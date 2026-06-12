@@ -7,6 +7,8 @@ export type RouteCoordinate = {
 };
 
 const EARTH_RADIUS_METERS = 6_371_000;
+const ELEVATION_SMOOTHING_RADIUS = 2;
+const MAX_ABSOLUTE_GRADE = 12;
 
 function toRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
@@ -57,6 +59,51 @@ function interpolate(
   };
 }
 
+function smoothElevations(points: RoutePoint[]): RoutePoint[] {
+  return points.map((point, index) => {
+    let weightedElevation = 0;
+    let totalWeight = 0;
+
+    for (
+      let offset = -ELEVATION_SMOOTHING_RADIUS;
+      offset <= ELEVATION_SMOOTHING_RADIUS;
+      offset++
+    ) {
+      const candidate = points[index + offset];
+      if (!candidate) continue;
+      const weight = ELEVATION_SMOOTHING_RADIUS + 1 - Math.abs(offset);
+      weightedElevation += candidate.elevation * weight;
+      totalWeight += weight;
+    }
+
+    return {
+      ...point,
+      elevation: weightedElevation / totalWeight,
+    };
+  });
+}
+
+function applySmoothedGrades(points: RoutePoint[]): RoutePoint[] {
+  return points.map((point, index) => {
+    const start = points[Math.max(0, index - ELEVATION_SMOOTHING_RADIUS)];
+    const end =
+      points[
+        Math.min(points.length - 1, index + ELEVATION_SMOOTHING_RADIUS)
+      ];
+    const distance = end.distance - start.distance;
+    const rawGrade =
+      distance > 0 ? ((end.elevation - start.elevation) / distance) * 100 : 0;
+
+    return {
+      ...point,
+      grade: Math.max(
+        -MAX_ABSOLUTE_GRADE,
+        Math.min(MAX_ABSOLUTE_GRADE, rawGrade)
+      ),
+    };
+  });
+}
+
 function sampleRoute(
   coordinates: RouteCoordinate[],
   intervalMeters: number
@@ -77,7 +124,7 @@ function sampleRoute(
   targetDistances.push(totalDistance);
 
   let segmentIndex = 0;
-  return targetDistances.map((distance) => {
+  const sampledPoints = targetDistances.map((distance) => {
     while (
       segmentIndex < coordinates.length - 2 &&
       cumulativeDistances[segmentIndex + 1] < distance
@@ -93,18 +140,15 @@ function sampleRoute(
     const ratio =
       segmentLength > 0 ? (distance - segmentStart) / segmentLength : 0;
     const point = interpolate(start, end, ratio);
-    const grade =
-      segmentLength > 0
-        ? ((elevationOf(end) - elevationOf(start)) / segmentLength) * 100
-        : 0;
-
     return {
       ...point,
       distance,
-      grade,
+      grade: 0,
       heading: headingBetween(start, end),
     };
   });
+
+  return applySmoothedGrades(smoothElevations(sampledPoints));
 }
 
 export function buildRouteFromCoordinates(
