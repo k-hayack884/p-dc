@@ -32,8 +32,8 @@ https://console.cloud.google.com/apis/library/routes.googleapis.com
 - 目的地: 奈良駅
 
 Routes APIが失敗した場合は、既存KMZルートへフォールバックする。
-Google Routes APIが自転車経路を返さない地域では徒歩経路を代用し、
-画面上に警告を表示する。徒歩経路には歩行者専用区間が含まれる可能性がある。
+Google Routes APIが自転車経路を返さない地域では車経路を代用し、
+画面上に警告を表示する。車経路には自転車が通行できない道路が含まれる可能性がある。
 
 Street View 更新は100mごと（`STREET_VIEW_INTERVAL`）。毎日1時間・月450km走行でも Dynamic Street View の無料枠（月5,000回）内に収まる設計。
 

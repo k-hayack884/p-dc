@@ -17,7 +17,7 @@ type ComputeRoutesResponse = {
 type RouteApiResult = {
   encodedPolyline: string;
   distanceMeters?: number;
-  travelMode: "BICYCLE" | "WALK";
+  travelMode: "BICYCLE" | "DRIVE";
   warning?: string;
 };
 
@@ -70,7 +70,7 @@ function routesApiPlugin(
             }
 
             const computeRoute = async (
-              travelMode: "BICYCLE" | "WALK"
+              travelMode: "BICYCLE" | "DRIVE"
             ): Promise<{
               response: Response;
               result: ComputeRoutesResponse;
@@ -138,25 +138,25 @@ function routesApiPlugin(
             let warning: string | undefined;
 
             if (!route?.polyline?.encodedPolyline) {
-              const walk = await computeRoute("WALK");
-              if (!walk.response.ok) {
-                sendJson(response, walk.response.status, {
+              const drive = await computeRoute("DRIVE");
+              if (!drive.response.ok) {
+                sendJson(response, drive.response.status, {
                   error:
-                    walk.result.error?.message ??
-                    "Routes APIの徒歩代替ルート取得に失敗しました",
+                    drive.result.error?.message ??
+                    "Routes APIの車代替ルート取得に失敗しました",
                 });
                 return;
               }
-              route = walk.result.routes?.[0];
-              travelMode = "WALK";
+              route = drive.result.routes?.[0];
+              travelMode = "DRIVE";
               warning =
-                "Google Routes APIで自転車経路が返らないため、徒歩経路を代用しています。歩行者専用区間を含む可能性があります。";
+                "Google Routes APIで自転車経路が返らないため、車経路を代用しています。自転車が通行できない道路を含む可能性があります。";
             }
 
             if (!route?.polyline?.encodedPolyline) {
               sendJson(response, 502, {
                 error:
-                  "Routes APIから自転車経路も徒歩代替経路も返りませんでした",
+                  "Routes APIから自転車経路も車代替経路も返りませんでした",
               });
               return;
             }

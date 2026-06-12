@@ -32,40 +32,45 @@
 
 .hud {
   position: absolute;
-  top: 24px;
-  left: 24px;
-  background: rgba(0, 0, 0, 0.6);
-  border-radius: 12px;
-  padding: 16px 20px;
-  backdrop-filter: blur(4px);
-  min-width: 260px;
+  top: 12px;
+  left: 12px;
+  background: rgba(0, 0, 0, 0.68);
+  border-radius: 8px;
+  padding: 9px 12px;
+  backdrop-filter: blur(3px);
+  width: max-content;
+  max-width: calc(100vw - 24px);
   z-index: 10;
 }
 
 .hud-row {
-  font-size: 16px;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
 }
 
 .hud-speed {
-  font-size: 44px;
+  font-size: 28px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1.1;
+  margin-bottom: 2px;
 }
 
 .hud-speed span {
-  font-size: 18px;
+  font-size: 12px;
   font-weight: 400;
 }
 
 .hud-sub {
-  font-size: 12px;
+  font-size: 10px;
   color: #9ab;
 }
 
 .hud-error {
   color: #f87171;
-  font-size: 13px;
+  font-size: 10px;
+  white-space: normal;
+  max-width: 240px;
 }
 
 .controls {
@@ -100,11 +105,15 @@
 
 .route-name {
   position: absolute;
-  top: 24px;
-  right: 24px;
+  top: 12px;
+  right: 12px;
   background: rgba(0, 0, 0, 0.5);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 13px;
+  border-radius: 6px;
+  padding: 5px 9px;
+  max-width: min(55vw, 560px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
   z-index: 10;
 }

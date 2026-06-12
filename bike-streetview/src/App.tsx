@@ -30,7 +30,7 @@ export default function App() {
   const svRef = useRef<HTMLDivElement>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
-  const [routeNotice, setRouteNotice] = useState<string | null>(null);
+  const [routeType, setRouteType] = useState("ルート読込中");
   const [hud, setHud] = useState<Hud>({
     speedKmh: 0,
     rpm: 0,
@@ -54,7 +54,7 @@ export default function App() {
       .then((result) => {
         if (!cancelled) {
           setRoute(result.route);
-          setRouteNotice(result.notice);
+          setRouteType(result.routeType);
         }
       })
       .catch(async (routesError: Error) => {
@@ -62,7 +62,7 @@ export default function App() {
           const fallbackRoute = await loadRouteFromKmzUrl(routeKmzUrl);
           if (!cancelled) {
             setRoute(fallbackRoute);
-            setRouteNotice(`Routes API失敗、KMZを使用: ${routesError.message}`);
+            setRouteType("KMZルート");
           }
         } catch (kmzError) {
           if (!cancelled) {
@@ -194,13 +194,14 @@ export default function App() {
         <div className="hud-row">
           標高 {hud.elevation.toFixed(1)} m ｜ 勾配 {hud.grade.toFixed(1)} %
         </div>
-        <div className="hud-row">RPM {hud.rpm.toFixed(0)}</div>
+        <div className="hud-row">
+          RPM {hud.rpm.toFixed(0)} ｜ {routeType}
+        </div>
         <div className="hud-row hud-sub">
-          SV更新 {hud.panoCount}回（{STREET_VIEW_INTERVAL}mごと）｜ 入力:{" "}
+          SV {hud.panoCount}回 / {STREET_VIEW_INTERVAL}m ｜{" "}
           {sensorMode === "keyboard" ? "キーボード" : "ESP32"}
         </div>
         {mapsError && <div className="hud-row hud-error">{mapsError}</div>}
-        {routeNotice && <div className="hud-row hud-error">{routeNotice}</div>}
         {API_KEY && !mapsReady && !mapsError && (
           <div className="hud-row hud-sub">Street View 読み込み中…</div>
         )}

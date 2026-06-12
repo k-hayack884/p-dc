@@ -5,7 +5,7 @@ import type { Route } from "../types";
 type RoutesApiResponse = {
   encodedPolyline?: string;
   distanceMeters?: number;
-  travelMode?: "BICYCLE" | "WALK";
+  travelMode?: "BICYCLE" | "DRIVE";
   warning?: string;
 };
 
@@ -13,7 +13,7 @@ const ROUTE_NAME = "新大阪駅 → 蒲生四丁目駅 → 奈良駅";
 
 export type GoogleRoutesResult = {
   route: Route;
-  notice: string;
+  routeType: "自転車ルート" | "車ルート";
 };
 
 let routePromise: Promise<GoogleRoutesResult> | null = null;
@@ -68,8 +68,8 @@ export function decodeGooglePolyline(encoded: string): RouteCoordinate[] {
 export function loadGoogleRoutesRoute(): Promise<GoogleRoutesResult> {
   if (routePromise) return routePromise;
 
-  routePromise = fetch("/api/routes/shin-osaka-nara")
-    .then(async (response) => {
+  const request = fetch("/api/routes/shin-osaka-nara")
+    .then<GoogleRoutesResult>(async (response) => {
       const result = (await response.json()) as RoutesApiResponse & {
         error?: string;
       };
@@ -86,14 +86,10 @@ export function loadGoogleRoutesRoute(): Promise<GoogleRoutesResult> {
       const travelMode = result.travelMode ?? "BICYCLE";
       return {
         route: buildRouteFromCoordinates(
-          travelMode === "WALK"
-            ? `${ROUTE_NAME}（徒歩経路代用）`
-            : ROUTE_NAME,
+          ROUTE_NAME,
           decodeGooglePolyline(result.encodedPolyline)
         ),
-        notice:
-          result.warning ??
-          "Googleの自転車ルートはベータ版で、自転車道や経路情報が不完全な場合があります。",
+        routeType: travelMode === "DRIVE" ? "車ルート" : "自転車ルート",
       };
     })
     .catch((error) => {
@@ -101,5 +97,6 @@ export function loadGoogleRoutesRoute(): Promise<GoogleRoutesResult> {
       throw error;
     });
 
-  return routePromise;
+  routePromise = request;
+  return request;
 }
