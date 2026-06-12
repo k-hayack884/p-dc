@@ -21,9 +21,21 @@ npm run dev
 npm test
 ```
 
+### ブラウザでルートを作成
+
+初期画面の「新しいルートを作成」から、住所や駅名を使ってルートを追加できる。
+
+- 移動モード: 自転車優先（取得できない場合は車）、自転車、車、徒歩
+- 経由地: 1行に1地点、最大25地点
+- 標高取得: Elevation APIから標高・勾配データを生成
+- 保存先: ブラウザのlocalStorage
+
+作成には`GOOGLE_ROUTES_API_KEY`が必要。標高取得を有効にする場合は
+`GOOGLE_ELEVATION_API_KEY`も設定する。
+
 ### Google Maps APIキー
 
-1. Google Cloud Console でプロジェクト作成、**Maps JavaScript API** を有効化
+1. Google Cloud Console でプロジェクト作成、**Maps JavaScript API** と **Geocoding API** を有効化
 2. **予算アラートとクォータ制限を必ず設定**（仕様書 7章・10章）
 3. `.env.local` の `VITE_GOOGLE_MAPS_API_KEY` に記入
 4. Routes API を有効化し、`GOOGLE_ROUTES_API_KEY` にサーバー側キーを記入
@@ -35,7 +47,7 @@ Elevation API有効化:
 https://console.cloud.google.com/apis/library/elevation-backend.googleapis.com
 
 APIキーにAPI制限を設定している場合は、許可対象へ
-`Maps JavaScript API`、`Routes API`、`Elevation API`を追加する。
+`Maps JavaScript API`、`Geocoding API`、`Routes API`、`Elevation API`を追加する。
 
 Elevation APIはHTTPリファラー制限付きキーを利用できない。
 `.env.local`の`GOOGLE_ELEVATION_API_KEY`にはサーバー用キーを設定し、
@@ -60,6 +72,7 @@ Google Routes APIが自転車経路を返さない地域では車経路を代用
 画面上に警告を表示する。車経路には自転車が通行できない道路が含まれる可能性がある。
 
 Street View 更新は100mごと（`STREET_VIEW_INTERVAL`）。毎日1時間・月450km走行でも Dynamic Street View の無料枠（月5,000回）内に収まる設計。
+Street View更新成功時にGeocoding APIで現在地を逆引きし、HUDへ都道府県・市区町村・町名まで表示する。
 
 ## 操作（キーボードテスト・仕様書 8章）
 

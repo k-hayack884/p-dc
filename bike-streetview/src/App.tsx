@@ -13,12 +13,22 @@ import {
   STREET_VIEW_INTERVAL,
 } from "./modules/streetViewController";
 import { loadRouteFromKmzUrl } from "./modules/kmzRouteLoader";
-import { loadGoogleRoutesRoute } from "./modules/googleRoutesLoader";
+import {
+  loadGoogleRoutesRoute,
+  type GoogleRouteId,
+} from "./modules/googleRoutesLoader";
+import {
+  deleteCustomRoute,
+  loadCustomRoutes,
+  type CustomRoute,
+} from "./modules/customRoutes";
+import { RouteCreator } from "./RouteCreator";
 import {
   clearRouteProgress,
   loadRouteProgress,
   saveRouteProgress,
 } from "./modules/routeProgress";
+import { reverseGeocodeArea } from "./modules/locationAddress";
 import routeKmzUrl from "../routes/sources/osaka-kyoto-yodogawa.kmz?url";
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
@@ -34,13 +44,13 @@ type Hud = {
 
 type SensorMode = "keyboard" | "virtual" | "serial";
 
-type RouteId =
+type BuiltInRouteId =
   | "osaka-kyoto"
   | "shin-osaka-nara"
   | "esaka-minoh-kayano";
 
 const ROUTE_OPTIONS: Array<{
-  id: RouteId;
+  id: BuiltInRouteId;
   title: string;
   description: string;
   source: string;
@@ -67,7 +77,10 @@ const ROUTE_OPTIONS: Array<{
 
 export default function App() {
   const svRef = useRef<HTMLDivElement>(null);
-  const [selectedRouteId, setSelectedRouteId] = useState<RouteId | null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [customRoutes, setCustomRoutes] =
+    useState<CustomRoute[]>(loadCustomRoutes);
+  const [creatingRoute, setCreatingRoute] = useState(false);
   const [route, setRoute] = useState<Route | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -82,6 +95,7 @@ export default function App() {
   });
   const [mapsReady, setMapsReady] = useState(false);
   const [mapsError, setMapsError] = useState<string | null>(null);
+  const [currentArea, setCurrentArea] = useState("住所取得中…");
   const [sensorMode, setSensorMode] = useState<SensorMode>("keyboard");
   const [virtualTargetRpm, setVirtualTargetRpm] = useState(0);
   const [virtualConnected, setVirtualConnected] = useState(true);
@@ -98,13 +112,20 @@ export default function App() {
 
     let cancelled = false;
 
-    const routeRequest =
-      selectedRouteId === "osaka-kyoto"
+    const customRoute = customRoutes.find(
+      (candidate) => candidate.id === selectedRouteId
+    );
+    const routeRequest = customRoute
+      ? Promise.resolve({
+          route: customRoute.route,
+          routeType: customRoute.routeType,
+        })
+      : selectedRouteId === "osaka-kyoto"
         ? loadRouteFromKmzUrl(routeKmzUrl).then((loadedRoute) => ({
             route: loadedRoute,
             routeType: "KMZルート",
           }))
-        : loadGoogleRoutesRoute(selectedRouteId);
+        : loadGoogleRoutesRoute(selectedRouteId as GoogleRouteId);
 
     routeRequest
       .then((result) => {
@@ -128,12 +149,30 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRouteId]);
+  }, [customRoutes, selectedRouteId]);
 
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
     if (!API_KEY || !route || !selectedRouteId) return;
     let cancelled = false;
+    let addressRequestId = 0;
+
+    const updateCurrentArea = async (
+      position: google.maps.LatLngLiteral
+    ) => {
+      const requestId = ++addressRequestId;
+      try {
+        const area = await reverseGeocodeArea(position);
+        if (!cancelled && requestId === addressRequestId) {
+          setCurrentArea(area);
+        }
+      } catch {
+        if (!cancelled && requestId === addressRequestId) {
+          setCurrentArea("住所取得失敗");
+        }
+      }
+    };
+
     loadMapsApi(API_KEY)
       .then(() => {
         if (cancelled || !svRef.current) return;
@@ -143,10 +182,12 @@ export default function App() {
           svRef.current,
           startPoint,
           startDistance,
-          (savedDistance) => {
+          (savedDistance, position) => {
             saveRouteProgress(selectedRouteId, savedDistance);
+            void updateCurrentArea(position);
           }
         );
+        void updateCurrentArea({ lat: startPoint.lat, lng: startPoint.lng });
         setMapsReady(true);
       })
       .catch((e: Error) => setMapsError(e.message));
@@ -263,15 +304,30 @@ export default function App() {
     setVirtualConnected(connected);
   };
 
-  const selectRoute = (routeId: RouteId) => {
+  const selectRoute = (routeId: string) => {
     setRoute(null);
     setRouteError(null);
     setRouteLoading(true);
     setMapsReady(false);
     setMapsError(null);
     setRouteType("");
+    setCurrentArea("住所取得中…");
     distanceRef.current = 0;
     setSelectedRouteId(routeId);
+  };
+
+  const handleCreatedRoute = (customRoute: CustomRoute) => {
+    setCustomRoutes((routes) => [customRoute, ...routes]);
+    setCreatingRoute(false);
+    selectRoute(customRoute.id);
+  };
+
+  const removeCustomRoute = (routeId: string) => {
+    deleteCustomRoute(routeId);
+    clearRouteProgress(routeId);
+    setCustomRoutes((routes) =>
+      routes.filter((customRoute) => customRoute.id !== routeId)
+    );
   };
 
   const returnToRouteSelection = () => {
@@ -293,12 +349,27 @@ export default function App() {
     setVirtualConnected(true);
   };
 
+  if (!selectedRouteId && creatingRoute) {
+    return (
+      <RouteCreator
+        onCancel={() => setCreatingRoute(false)}
+        onCreated={handleCreatedRoute}
+      />
+    );
+  }
+
   if (!selectedRouteId) {
     return (
-      <div className="route-selection">
+      <div className="route-selection" key="route-selection">
         <div className="route-selection-panel">
           <p className="route-selection-kicker">BIKE STREET VIEW</p>
           <h1>走行するルートを選択</h1>
+          <button
+            className="create-route-button"
+            onClick={() => setCreatingRoute(true)}
+          >
+            ＋ 新しいルートを作成
+          </button>
           <div className="route-options">
             {ROUTE_OPTIONS.map((option) => (
               <button
@@ -311,6 +382,27 @@ export default function App() {
                 <span>{option.description}</span>
               </button>
             ))}
+            {customRoutes.map((customRoute) => (
+              <div className="route-option custom-route-option" key={customRoute.id}>
+                <button onClick={() => selectRoute(customRoute.id)}>
+                  <span className="route-option-source">
+                    保存済み・{customRoute.routeType}
+                  </span>
+                  <strong>{customRoute.route.name}</strong>
+                  <span>
+                    {customRoute.request.origin} →{" "}
+                    {customRoute.request.destination}
+                  </span>
+                </button>
+                <button
+                  className="delete-route-button"
+                  aria-label={`${customRoute.route.name}を削除`}
+                  onClick={() => removeCustomRoute(customRoute.id)}
+                >
+                  削除
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -319,7 +411,7 @@ export default function App() {
 
   if (!route || routeLoading) {
     return (
-      <div className="app">
+      <div className="app" key="route-loading">
         <div className="placeholder">
           <h2>{routeError ? "ルート読み込み失敗" : "ルート準備中…"}</h2>
           {routeError && <p>{routeError}</p>}
@@ -337,7 +429,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" key="route-running">
       {API_KEY ? (
         <div ref={svRef} className="streetview" />
       ) : (
@@ -353,6 +445,7 @@ export default function App() {
       )}
 
       <div className="hud">
+        <div className="hud-row hud-location">{currentArea}</div>
         <div className="hud-row hud-speed">
           {hud.speedKmh.toFixed(1)} <span>km/h</span>
         </div>

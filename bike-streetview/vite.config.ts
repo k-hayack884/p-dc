@@ -18,7 +18,7 @@ type ComputeRoutesResponse = {
 type RouteApiResult = {
   encodedPolyline: string;
   distanceMeters?: number;
-  travelMode: "BICYCLE" | "DRIVE";
+  travelMode: "BICYCLE" | "DRIVE" | "WALK";
   coordinates?: Array<{
     lat: number;
     lng: number;
@@ -40,18 +40,25 @@ type ElevationResponse = {
 };
 
 type RouteDefinition = {
-  origin: {
-    latitude: number;
-    longitude: number;
-  };
-  destination: {
-    latitude: number;
-    longitude: number;
-  };
-  intermediates?: Array<{
-    latitude: number;
-    longitude: number;
-  }>;
+  origin: RouteWaypoint;
+  destination: RouteWaypoint;
+  intermediates?: RouteWaypoint[];
+  includeElevation?: boolean;
+};
+
+type RouteWaypoint =
+  | string
+  | {
+      latitude: number;
+      longitude: number;
+    };
+
+type CreateRouteRequest = {
+  name?: string;
+  origin?: string;
+  destination?: string;
+  intermediates?: string[];
+  travelMode?: "AUTO" | RouteApiResult["travelMode"];
   includeElevation?: boolean;
 };
 
@@ -130,6 +137,20 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function waypointBody(waypoint: RouteWaypoint): unknown {
+  return typeof waypoint === "string"
+    ? { address: waypoint }
+    : { location: { latLng: waypoint } };
+}
+
 function routesApiPlugin(
   apiKey: string | undefined,
   elevationApiKey: string | undefined,
@@ -143,12 +164,64 @@ function routesApiPlugin(
       server.middlewares.use(
         "/api/routes",
         async (request: IncomingMessage, response: ServerResponse) => {
-          if (request.method !== "GET") {
+          const routeId = request.url?.replace(/^\/+/, "").split("?")[0] ?? "";
+          const isCustomRequest =
+            request.method === "POST" && routeId === "compute";
+
+          if (request.method !== "GET" && !isCustomRequest) {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
           }
-          const routeId = request.url?.replace(/^\/+/, "").split("?")[0] ?? "";
-          const definition = ROUTE_DEFINITIONS[routeId];
+
+          let definition: RouteDefinition | undefined;
+          let requestedTravelMode: CreateRouteRequest["travelMode"] = "AUTO";
+
+          if (isCustomRequest) {
+            try {
+              const body = (await readJsonBody(request)) as CreateRouteRequest;
+              const origin = body.origin?.trim();
+              const destination = body.destination?.trim();
+              const intermediates = body.intermediates
+                ?.map((value) => value.trim())
+                .filter(Boolean);
+
+              if (!origin || !destination) {
+                sendJson(response, 400, {
+                  error: "出発地と目的地を入力してください",
+                });
+                return;
+              }
+              if ((intermediates?.length ?? 0) > 25) {
+                sendJson(response, 400, {
+                  error: "経由地は25件以内にしてください",
+                });
+                return;
+              }
+              if (
+                body.travelMode &&
+                !["AUTO", "BICYCLE", "DRIVE", "WALK"].includes(
+                  body.travelMode
+                )
+              ) {
+                sendJson(response, 400, { error: "移動モードが不正です" });
+                return;
+              }
+
+              definition = {
+                origin,
+                destination,
+                intermediates,
+                includeElevation: body.includeElevation !== false,
+              };
+              requestedTravelMode = body.travelMode ?? "AUTO";
+            } catch {
+              sendJson(response, 400, { error: "リクエストJSONが不正です" });
+              return;
+            }
+          } else {
+            definition = ROUTE_DEFINITIONS[routeId];
+          }
+
           if (!definition) {
             sendJson(response, 404, { error: "Unknown route" });
             return;
@@ -166,7 +239,9 @@ function routesApiPlugin(
             });
             return;
           }
-          const cachedRoute = routeCache.get(routeId);
+          const cachedRoute = isCustomRequest
+            ? undefined
+            : routeCache.get(routeId);
           if (cachedRoute) {
             sendJson(response, 200, cachedRoute);
             return;
@@ -184,7 +259,7 @@ function routesApiPlugin(
             }
 
             const computeRoute = async (
-              travelMode: "BICYCLE" | "DRIVE"
+              travelMode: RouteApiResult["travelMode"]
             ): Promise<{
               response: Response;
               result: ComputeRoutesResponse;
@@ -195,26 +270,17 @@ function routesApiPlugin(
                   method: "POST",
                   headers,
                   body: JSON.stringify({
-                  origin: {
-                    location: {
-                      latLng: definition.origin,
-                    },
-                  },
-                  destination: {
-                    location: {
-                      latLng: definition.destination,
-                    },
-                  },
-                  intermediates: definition.intermediates?.map((latLng) => ({
-                    location: { latLng },
-                  })),
-                  travelMode,
-                  computeAlternativeRoutes: false,
-                  polylineQuality: "HIGH_QUALITY",
-                  polylineEncoding: "ENCODED_POLYLINE",
-                  languageCode: "ja",
-                  units: "METRIC",
-                }),
+                    origin: waypointBody(definition.origin),
+                    destination: waypointBody(definition.destination),
+                    intermediates:
+                      definition.intermediates?.map(waypointBody),
+                    travelMode,
+                    computeAlternativeRoutes: false,
+                    polylineQuality: "HIGH_QUALITY",
+                    polylineEncoding: "ENCODED_POLYLINE",
+                    languageCode: "ja",
+                    units: "METRIC",
+                  }),
                 }
               );
               return {
@@ -224,21 +290,28 @@ function routesApiPlugin(
               };
             };
 
-            const bicycle = await computeRoute("BICYCLE");
-            if (!bicycle.response.ok) {
-              sendJson(response, bicycle.response.status, {
+            const primaryMode =
+              requestedTravelMode === "AUTO"
+                ? "BICYCLE"
+                : requestedTravelMode;
+            const primary = await computeRoute(primaryMode);
+            if (!primary.response.ok) {
+              sendJson(response, primary.response.status, {
                 error:
-                  bicycle.result.error?.message ??
-                  "Routes APIの自転車ルート取得に失敗しました",
+                  primary.result.error?.message ??
+                  "Routes APIのルート取得に失敗しました",
               });
               return;
             }
 
-            let route = bicycle.result.routes?.[0];
-            let travelMode: RouteApiResult["travelMode"] = "BICYCLE";
+            let route = primary.result.routes?.[0];
+            let travelMode: RouteApiResult["travelMode"] = primaryMode;
             let warning: string | undefined;
 
-            if (!route?.polyline?.encodedPolyline) {
+            if (
+              requestedTravelMode === "AUTO" &&
+              !route?.polyline?.encodedPolyline
+            ) {
               const drive = await computeRoute("DRIVE");
               if (!drive.response.ok) {
                 sendJson(response, drive.response.status, {
@@ -256,8 +329,7 @@ function routesApiPlugin(
 
             if (!route?.polyline?.encodedPolyline) {
               sendJson(response, 502, {
-                error:
-                  "Routes APIから自転車経路も車代替経路も返りませんでした",
+                error: "Routes APIからルートが返りませんでした",
               });
               return;
             }
@@ -319,7 +391,9 @@ function routesApiPlugin(
               );
             }
 
-            routeCache.set(routeId, routeResult);
+            if (!isCustomRequest) {
+              routeCache.set(routeId, routeResult);
+            }
             sendJson(response, 200, routeResult);
           } catch (error) {
             sendJson(response, 502, {

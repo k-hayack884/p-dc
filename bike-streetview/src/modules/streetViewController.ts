@@ -47,7 +47,10 @@ export class StreetViewController {
   private panorama: google.maps.StreetViewPanorama;
   private svService: google.maps.StreetViewService;
   private lastUpdateDistance: number;
-  private onPanoramaChanged?: (distance: number) => void;
+  private onPanoramaChanged?: (
+    distance: number,
+    position: google.maps.LatLngLiteral
+  ) => void;
   private generation = 0;
   /** 更新回数（API料金の目安として HUD に表示） */
   panoUpdateCount = 0;
@@ -56,7 +59,10 @@ export class StreetViewController {
     container: HTMLElement,
     start: RoutePoint,
     initialDistance = 0,
-    onPanoramaChanged?: (distance: number) => void
+    onPanoramaChanged?: (
+      distance: number,
+      position: google.maps.LatLngLiteral
+    ) => void
   ) {
     this.panorama = new google.maps.StreetViewPanorama(container, {
       position: { lat: start.lat, lng: start.lng },
@@ -103,7 +109,10 @@ export class StreetViewController {
         this.panorama.setPosition(data.location.latLng);
         this.panorama.setPov({ heading: point.heading, pitch: 0 });
         this.panoUpdateCount++;
-        this.onPanoramaChanged?.(distance);
+        this.onPanoramaChanged?.(distance, {
+          lat: data.location.latLng.lat(),
+          lng: data.location.latLng.lng(),
+        });
       }
     } catch {
       // パノラマなし: 今回はスキップして次の更新地点を待つ（仕様書 10章）
@@ -115,6 +124,7 @@ export class StreetViewController {
     this.lastUpdateDistance = 0;
     this.panorama.setPosition({ lat: start.lat, lng: start.lng });
     this.panorama.setPov({ heading: start.heading, pitch: 0 });
+    this.onPanoramaChanged?.(0, { lat: start.lat, lng: start.lng });
   }
 
   destroy(): void {

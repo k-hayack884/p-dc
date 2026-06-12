@@ -38,6 +38,19 @@
   font-size: clamp(28px, 5vw, 44px);
 }
 
+.create-route-button {
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 14px 20px;
+  border: 1px solid #60a5fa;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  background: #2563eb;
+  cursor: pointer;
+}
+
 .route-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -80,10 +93,137 @@
   line-height: 1.5;
 }
 
+.custom-route-option {
+  position: relative;
+  padding: 0;
+  overflow: hidden;
+}
+
+.custom-route-option > button:first-child {
+  width: 100%;
+  min-height: 180px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 9px;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.custom-route-option .delete-route-button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 999px;
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.72);
+  cursor: pointer;
+}
+
 .route-option-source {
   color: #93c5fd;
   font-size: 11px;
   font-weight: 700;
+}
+
+.route-creator {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 48px);
+  padding: 28px;
+  display: grid;
+  gap: 18px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 18px;
+  background: rgba(7, 13, 20, 0.88);
+}
+
+.route-creator h1 {
+  margin: 0;
+}
+
+.route-creator label {
+  display: grid;
+  gap: 7px;
+  color: #dbeafe;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.route-creator input,
+.route-creator textarea,
+.route-creator select {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid #475569;
+  border-radius: 9px;
+  color: #fff;
+  font: inherit;
+  background: #111827;
+}
+
+.route-creator textarea {
+  resize: vertical;
+}
+
+.route-creator small {
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.route-creator-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.route-creator .route-creator-checkbox {
+  display: flex;
+  align-items: center;
+  align-self: end;
+  min-height: 42px;
+}
+
+.route-creator-checkbox input {
+  width: auto;
+}
+
+.route-creator-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+.route-creator-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.route-creator-actions button {
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: #2563eb;
+  cursor: pointer;
+}
+
+.route-creator-actions button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.route-creator-actions .secondary-button {
+  background: #475569;
 }
 
 .route-selection-back {
@@ -136,6 +276,16 @@
   font-size: 12px;
   line-height: 1.45;
   white-space: nowrap;
+}
+
+.hud-location {
+  max-width: 260px;
+  margin-bottom: 3px;
+  overflow: hidden;
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
 }
 
 .hud-speed {
@@ -264,6 +414,10 @@
 
   .route-option {
     min-height: 140px;
+  }
+
+  .route-creator-columns {
+    grid-template-columns: 1fr;
   }
 
   .controls > span {

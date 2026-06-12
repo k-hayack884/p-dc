@@ -5,16 +5,27 @@ import type { Route } from "../types";
 type RoutesApiResponse = {
   encodedPolyline?: string;
   distanceMeters?: number;
-  travelMode?: "BICYCLE" | "DRIVE";
+  travelMode?: GoogleTravelMode;
   coordinates?: RouteCoordinate[];
   warning?: string;
 };
 
-type GoogleRouteId = "shin-osaka-nara" | "esaka-minoh-kayano";
+export type GoogleRouteId = "shin-osaka-nara" | "esaka-minoh-kayano";
+
+export type GoogleTravelMode = "BICYCLE" | "DRIVE" | "WALK";
+
+export type CreateGoogleRouteRequest = {
+  name: string;
+  origin: string;
+  destination: string;
+  intermediates: string[];
+  travelMode: GoogleTravelMode | "AUTO";
+  includeElevation: boolean;
+};
 
 export type GoogleRoutesResult = {
   route: Route;
-  routeType: "自転車ルート" | "車ルート";
+  routeType: "自転車ルート" | "車ルート" | "徒歩ルート";
 };
 
 const routePromises = new Map<GoogleRouteId, Promise<GoogleRoutesResult>>();
@@ -71,6 +82,39 @@ export function decodeGooglePolyline(encoded: string): RouteCoordinate[] {
   return coordinates;
 }
 
+function routeTypeFromTravelMode(
+  travelMode: GoogleTravelMode
+): GoogleRoutesResult["routeType"] {
+  if (travelMode === "DRIVE") return "車ルート";
+  if (travelMode === "WALK") return "徒歩ルート";
+  return "自転車ルート";
+}
+
+async function parseGoogleRoutesResponse(
+  response: Response,
+  routeName: string
+): Promise<GoogleRoutesResult> {
+  const result = (await response.json()) as RoutesApiResponse & {
+    error?: string;
+  };
+
+  if (!response.ok) {
+    throw new Error(result.error ?? `Routes API取得失敗: ${response.status}`);
+  }
+  if (!result.encodedPolyline) {
+    throw new Error("Routes APIからpolylineが返りませんでした");
+  }
+
+  const travelMode = result.travelMode ?? "BICYCLE";
+  const coordinates =
+    result.coordinates ?? decodeGooglePolyline(result.encodedPolyline);
+
+  return {
+    route: buildRouteFromCoordinates(routeName, coordinates),
+    routeType: routeTypeFromTravelMode(travelMode),
+  };
+}
+
 export function loadGoogleRoutesRoute(
   routeId: GoogleRouteId
 ): Promise<GoogleRoutesResult> {
@@ -78,31 +122,7 @@ export function loadGoogleRoutesRoute(
   if (cachedPromise) return cachedPromise;
 
   const request = fetch(`/api/routes/${routeId}`)
-    .then<GoogleRoutesResult>(async (response) => {
-      const result = (await response.json()) as RoutesApiResponse & {
-        error?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(
-          result.error ?? `Routes API取得失敗: ${response.status}`
-        );
-      }
-      if (!result.encodedPolyline) {
-        throw new Error("Routes APIからpolylineが返りませんでした");
-      }
-
-      const travelMode = result.travelMode ?? "BICYCLE";
-      const coordinates =
-        result.coordinates ?? decodeGooglePolyline(result.encodedPolyline);
-      return {
-        route: buildRouteFromCoordinates(
-          ROUTE_NAMES[routeId],
-          coordinates
-        ),
-        routeType: travelMode === "DRIVE" ? "車ルート" : "自転車ルート",
-      };
-    })
+    .then((response) => parseGoogleRoutesResponse(response, ROUTE_NAMES[routeId]))
     .catch((error) => {
       routePromises.delete(routeId);
       throw error;
@@ -110,4 +130,16 @@ export function loadGoogleRoutesRoute(
 
   routePromises.set(routeId, request);
   return request;
+}
+
+export function createGoogleRoutesRoute(
+  request: CreateGoogleRouteRequest
+): Promise<GoogleRoutesResult> {
+  return fetch("/api/routes/compute", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  }).then((response) => parseGoogleRoutesResponse(response, request.name));
 }
