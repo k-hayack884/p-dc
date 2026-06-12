@@ -101,4 +101,8 @@ export class StreetViewController {
     this.panorama.setPosition({ lat: start.lat, lng: start.lng });
     this.panorama.setPov({ heading: start.heading, pitch: 0 });
   }
+
+  destroy(): void {
+    this.panorama.setVisible(false);
+  }
 }

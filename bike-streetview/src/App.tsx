@@ -26,11 +26,35 @@ type Hud = {
   panoCount: number;
 };
 
+type RouteId = "osaka-kyoto" | "shin-osaka-nara";
+
+const ROUTE_OPTIONS: Array<{
+  id: RouteId;
+  title: string;
+  description: string;
+  source: string;
+}> = [
+  {
+    id: "osaka-kyoto",
+    title: "大阪・淀川 → 京都御所",
+    description: "淀川沿いを北上する約48kmのルート",
+    source: "KMZルート",
+  },
+  {
+    id: "shin-osaka-nara",
+    title: "新大阪 → 蒲生四丁目 → 奈良",
+    description: "蒲生四丁目を経由して奈良へ向かう約39kmのルート",
+    source: "Google Routes API",
+  },
+];
+
 export default function App() {
   const svRef = useRef<HTMLDivElement>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<RouteId | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
-  const [routeType, setRouteType] = useState("ルート読込中");
+  const [routeType, setRouteType] = useState("");
   const [hud, setHud] = useState<Hud>({
     speedKmh: 0,
     rpm: 0,
@@ -49,33 +73,36 @@ export default function App() {
   const serialRef = useRef<SerialSensor | null>(null);
 
   useEffect(() => {
+    if (!selectedRouteId) return;
+
     let cancelled = false;
-    loadGoogleRoutesRoute()
+
+    const routeRequest =
+      selectedRouteId === "osaka-kyoto"
+        ? loadRouteFromKmzUrl(routeKmzUrl).then((loadedRoute) => ({
+            route: loadedRoute,
+            routeType: "KMZルート",
+          }))
+        : loadGoogleRoutesRoute();
+
+    routeRequest
       .then((result) => {
         if (!cancelled) {
           setRoute(result.route);
           setRouteType(result.routeType);
         }
       })
-      .catch(async (routesError: Error) => {
-        try {
-          const fallbackRoute = await loadRouteFromKmzUrl(routeKmzUrl);
-          if (!cancelled) {
-            setRoute(fallbackRoute);
-            setRouteType("KMZルート");
-          }
-        } catch (kmzError) {
-          if (!cancelled) {
-            setRouteError(
-              `${routesError.message} / ${(kmzError as Error).message}`
-            );
-          }
-        }
+      .catch((error: Error) => {
+        if (!cancelled) setRouteError(error.message);
+      })
+      .finally(() => {
+        if (!cancelled) setRouteLoading(false);
       });
+
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedRouteId]);
 
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
@@ -93,6 +120,7 @@ export default function App() {
       .catch((e: Error) => setMapsError(e.message));
     return () => {
       cancelled = true;
+      controllerRef.current?.destroy();
       controllerRef.current = null;
     };
   }, [route]);
@@ -156,12 +184,70 @@ export default function App() {
     }
   };
 
-  if (!route) {
+  const selectRoute = (routeId: RouteId) => {
+    setRoute(null);
+    setRouteError(null);
+    setRouteLoading(true);
+    setMapsReady(false);
+    setMapsError(null);
+    setRouteType("");
+    distanceRef.current = 0;
+    setSelectedRouteId(routeId);
+  };
+
+  const returnToRouteSelection = () => {
+    controllerRef.current?.destroy();
+    controllerRef.current = null;
+    serialRef.current?.stop();
+    serialRef.current = null;
+    sensorRef.current = null;
+    distanceRef.current = 0;
+    setRoute(null);
+    setRouteLoading(false);
+    setRouteError(null);
+    setRouteType("");
+    setSelectedRouteId(null);
+    setSensorMode("keyboard");
+  };
+
+  if (!selectedRouteId) {
+    return (
+      <div className="route-selection">
+        <div className="route-selection-panel">
+          <p className="route-selection-kicker">BIKE STREET VIEW</p>
+          <h1>走行するルートを選択</h1>
+          <div className="route-options">
+            {ROUTE_OPTIONS.map((option) => (
+              <button
+                className="route-option"
+                key={option.id}
+                onClick={() => selectRoute(option.id)}
+              >
+                <span className="route-option-source">{option.source}</span>
+                <strong>{option.title}</strong>
+                <span>{option.description}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!route || routeLoading) {
     return (
       <div className="app">
         <div className="placeholder">
-          <h2>{routeError ? "ルート読み込み失敗" : "ルート生成中…"}</h2>
+          <h2>{routeError ? "ルート読み込み失敗" : "ルート準備中…"}</h2>
           {routeError && <p>{routeError}</p>}
+          {routeError && (
+            <button
+              className="route-selection-back"
+              onClick={returnToRouteSelection}
+            >
+              ルート選択へ戻る
+            </button>
+          )}
         </div>
       </div>
     );
@@ -212,6 +298,9 @@ export default function App() {
         {SerialSensor.isSupported() && sensorMode === "keyboard" && (
           <button onClick={connectSerial}>ESP32接続</button>
         )}
+        <button className="secondary-button" onClick={returnToRouteSelection}>
+          ルート変更
+        </button>
       </div>
 
       <div className="route-name">{route.name}</div>
