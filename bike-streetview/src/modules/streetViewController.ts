@@ -46,11 +46,18 @@ export function loadMapsApi(apiKey: string): Promise<typeof google> {
 export class StreetViewController {
   private panorama: google.maps.StreetViewPanorama;
   private svService: google.maps.StreetViewService;
-  private lastUpdateDistance = 0;
+  private lastUpdateDistance: number;
+  private onPanoramaChanged?: (distance: number) => void;
+  private generation = 0;
   /** 更新回数（API料金の目安として HUD に表示） */
   panoUpdateCount = 0;
 
-  constructor(container: HTMLElement, start: RoutePoint) {
+  constructor(
+    container: HTMLElement,
+    start: RoutePoint,
+    initialDistance = 0,
+    onPanoramaChanged?: (distance: number) => void
+  ) {
     this.panorama = new google.maps.StreetViewPanorama(container, {
       position: { lat: start.lat, lng: start.lng },
       pov: { heading: start.heading, pitch: 0 },
@@ -63,6 +70,8 @@ export class StreetViewController {
       showRoadLabels: false,
     });
     this.svService = new google.maps.StreetViewService();
+    this.lastUpdateDistance = initialDistance;
+    this.onPanoramaChanged = onPanoramaChanged;
   }
 
   /**
@@ -74,22 +83,27 @@ export class StreetViewController {
       return false;
     }
     this.lastUpdateDistance = totalDistanceMeters;
-    void this.moveTo(point);
+    void this.moveTo(totalDistanceMeters, point, this.generation);
     return true;
   }
 
   /** パノラマ未対応地点は半径50mで近傍探索し、なければスキップ */
-  private async moveTo(point: RoutePoint): Promise<void> {
+  private async moveTo(
+    distance: number,
+    point: RoutePoint,
+    generation: number
+  ): Promise<void> {
     try {
       const { data } = await this.svService.getPanorama({
         location: { lat: point.lat, lng: point.lng },
         radius: 50,
         source: google.maps.StreetViewSource.OUTDOOR,
       });
-      if (data.location?.latLng) {
+      if (generation === this.generation && data.location?.latLng) {
         this.panorama.setPosition(data.location.latLng);
         this.panorama.setPov({ heading: point.heading, pitch: 0 });
         this.panoUpdateCount++;
+        this.onPanoramaChanged?.(distance);
       }
     } catch {
       // パノラマなし: 今回はスキップして次の更新地点を待つ（仕様書 10章）
@@ -97,12 +111,14 @@ export class StreetViewController {
   }
 
   reset(start: RoutePoint): void {
+    this.generation++;
     this.lastUpdateDistance = 0;
     this.panorama.setPosition({ lat: start.lat, lng: start.lng });
     this.panorama.setPov({ heading: start.heading, pitch: 0 });
   }
 
   destroy(): void {
+    this.generation++;
     this.panorama.setVisible(false);
   }
 }

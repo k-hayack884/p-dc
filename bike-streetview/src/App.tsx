@@ -13,6 +13,11 @@ import {
 } from "./modules/streetViewController";
 import { loadRouteFromKmzUrl } from "./modules/kmzRouteLoader";
 import { loadGoogleRoutesRoute } from "./modules/googleRoutesLoader";
+import {
+  clearRouteProgress,
+  loadRouteProgress,
+  saveRouteProgress,
+} from "./modules/routeProgress";
 import routeKmzUrl from "../routes/sources/osaka-kyoto-yodogawa.kmz?url";
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
@@ -26,7 +31,10 @@ type Hud = {
   panoCount: number;
 };
 
-type RouteId = "osaka-kyoto" | "shin-osaka-nara";
+type RouteId =
+  | "osaka-kyoto"
+  | "shin-osaka-nara"
+  | "esaka-minoh-kayano";
 
 const ROUTE_OPTIONS: Array<{
   id: RouteId;
@@ -45,6 +53,12 @@ const ROUTE_OPTIONS: Array<{
     title: "新大阪 → 蒲生四丁目 → 奈良",
     description: "蒲生四丁目を経由して奈良へ向かう約39kmのルート",
     source: "Google Routes API",
+  },
+  {
+    id: "esaka-minoh-kayano",
+    title: "江坂 → 箕面萱野",
+    description: "標高・勾配を確認する北摂のテストルート",
+    source: "Routes + Elevation API",
   },
 ];
 
@@ -83,11 +97,16 @@ export default function App() {
             route: loadedRoute,
             routeType: "KMZルート",
           }))
-        : loadGoogleRoutesRoute();
+        : loadGoogleRoutesRoute(selectedRouteId);
 
     routeRequest
       .then((result) => {
         if (!cancelled) {
+          const savedDistance = Math.min(
+            loadRouteProgress(selectedRouteId),
+            totalDistance(result.route)
+          );
+          distanceRef.current = savedDistance;
           setRoute(result.route);
           setRouteType(result.routeType);
         }
@@ -106,14 +125,20 @@ export default function App() {
 
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
-    if (!API_KEY || !route) return;
+    if (!API_KEY || !route || !selectedRouteId) return;
     let cancelled = false;
     loadMapsApi(API_KEY)
       .then(() => {
         if (cancelled || !svRef.current) return;
+        const startDistance = distanceRef.current;
+        const startPoint = getPointAtDistance(route, startDistance);
         controllerRef.current = new StreetViewController(
           svRef.current,
-          route.points[0]
+          startPoint,
+          startDistance,
+          (savedDistance) => {
+            saveRouteProgress(selectedRouteId, savedDistance);
+          }
         );
         setMapsReady(true);
       })
@@ -123,7 +148,7 @@ export default function App() {
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [route]);
+  }, [route, selectedRouteId]);
 
   // センサー＋走行ループ
   useEffect(() => {
@@ -131,6 +156,7 @@ export default function App() {
     const keyboard = new KeyboardSensor();
     keyboard.onReset = () => {
       distanceRef.current = 0;
+      if (selectedRouteId) clearRouteProgress(selectedRouteId);
       controllerRef.current?.reset(route.points[0]);
     };
     keyboard.start();
@@ -143,12 +169,13 @@ export default function App() {
       lastT = t;
 
       const sensor = sensorRef.current ?? keyboard;
-      const p: RoutePoint = getPointAtDistance(route, distanceRef.current);
-      const speed = sensor.getSpeedMps() * gradeFactor(p.grade);
+      const currentPoint = getPointAtDistance(route, distanceRef.current);
+      const speed = sensor.getSpeedMps() * gradeFactor(currentPoint.grade);
       distanceRef.current = Math.min(
         distanceRef.current + speed * dt,
         totalDistance(route)
       );
+      const p: RoutePoint = getPointAtDistance(route, distanceRef.current);
 
       const ctrl = controllerRef.current;
       ctrl?.maybeUpdate(distanceRef.current, p);
@@ -170,7 +197,7 @@ export default function App() {
       keyboard.stop();
       serialRef.current?.stop();
     };
-  }, [route]);
+  }, [route, selectedRouteId]);
 
   const connectSerial = async () => {
     try {

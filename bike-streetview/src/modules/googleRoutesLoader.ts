@@ -6,17 +6,23 @@ type RoutesApiResponse = {
   encodedPolyline?: string;
   distanceMeters?: number;
   travelMode?: "BICYCLE" | "DRIVE";
+  coordinates?: RouteCoordinate[];
   warning?: string;
 };
 
-const ROUTE_NAME = "新大阪駅 → 蒲生四丁目駅 → 奈良駅";
+type GoogleRouteId = "shin-osaka-nara" | "esaka-minoh-kayano";
 
 export type GoogleRoutesResult = {
   route: Route;
   routeType: "自転車ルート" | "車ルート";
 };
 
-let routePromise: Promise<GoogleRoutesResult> | null = null;
+const routePromises = new Map<GoogleRouteId, Promise<GoogleRoutesResult>>();
+
+const ROUTE_NAMES: Record<GoogleRouteId, string> = {
+  "shin-osaka-nara": "新大阪駅 → 蒲生四丁目駅 → 奈良駅",
+  "esaka-minoh-kayano": "江坂駅 → 箕面萱野駅",
+};
 
 function decodeSignedValue(
   encoded: string,
@@ -65,10 +71,13 @@ export function decodeGooglePolyline(encoded: string): RouteCoordinate[] {
   return coordinates;
 }
 
-export function loadGoogleRoutesRoute(): Promise<GoogleRoutesResult> {
-  if (routePromise) return routePromise;
+export function loadGoogleRoutesRoute(
+  routeId: GoogleRouteId
+): Promise<GoogleRoutesResult> {
+  const cachedPromise = routePromises.get(routeId);
+  if (cachedPromise) return cachedPromise;
 
-  const request = fetch("/api/routes/shin-osaka-nara")
+  const request = fetch(`/api/routes/${routeId}`)
     .then<GoogleRoutesResult>(async (response) => {
       const result = (await response.json()) as RoutesApiResponse & {
         error?: string;
@@ -84,19 +93,21 @@ export function loadGoogleRoutesRoute(): Promise<GoogleRoutesResult> {
       }
 
       const travelMode = result.travelMode ?? "BICYCLE";
+      const coordinates =
+        result.coordinates ?? decodeGooglePolyline(result.encodedPolyline);
       return {
         route: buildRouteFromCoordinates(
-          ROUTE_NAME,
-          decodeGooglePolyline(result.encodedPolyline)
+          ROUTE_NAMES[routeId],
+          coordinates
         ),
         routeType: travelMode === "DRIVE" ? "車ルート" : "自転車ルート",
       };
     })
     .catch((error) => {
-      routePromise = null;
+      routePromises.delete(routeId);
       throw error;
     });
 
-  routePromise = request;
+  routePromises.set(routeId, request);
   return request;
 }
