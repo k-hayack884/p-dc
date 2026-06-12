@@ -162,6 +162,48 @@
   max-width: 240px;
 }
 
+.virtual-esp32-panel {
+  position: absolute;
+  left: 12px;
+  bottom: 72px;
+  z-index: 10;
+  min-width: 230px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.virtual-esp32-panel > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.virtual-esp32-panel span {
+  color: #93c5fd;
+}
+
+.virtual-esp32-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.virtual-esp32-actions button {
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #fff;
+  background: #2563eb;
+  cursor: pointer;
+}
+
+.virtual-esp32-actions .danger-button {
+  background: #b91c1c;
+}
+
 .controls {
   position: absolute;
   bottom: 20px;

@@ -6,6 +6,7 @@ import { getPointAtDistance } from "./modules/routeSampler";
 import { gradeFactor } from "./modules/grade";
 import { KeyboardSensor } from "./modules/sensorKeyboard";
 import { SerialSensor } from "./modules/sensorSerial";
+import { VirtualEsp32Sensor } from "./modules/sensorVirtualEsp32";
 import {
   loadMapsApi,
   StreetViewController,
@@ -30,6 +31,8 @@ type Hud = {
   grade: number;
   panoCount: number;
 };
+
+type SensorMode = "keyboard" | "virtual" | "serial";
 
 type RouteId =
   | "osaka-kyoto"
@@ -79,12 +82,16 @@ export default function App() {
   });
   const [mapsReady, setMapsReady] = useState(false);
   const [mapsError, setMapsError] = useState<string | null>(null);
-  const [sensorMode, setSensorMode] = useState<"keyboard" | "serial">("keyboard");
+  const [sensorMode, setSensorMode] = useState<SensorMode>("keyboard");
+  const [virtualTargetRpm, setVirtualTargetRpm] = useState(0);
+  const [virtualConnected, setVirtualConnected] = useState(true);
 
   const distanceRef = useRef(0);
   const controllerRef = useRef<StreetViewController | null>(null);
   const sensorRef = useRef<SensorAdapter | null>(null);
   const serialRef = useRef<SerialSensor | null>(null);
+  const virtualRef = useRef<VirtualEsp32Sensor | null>(null);
+  const keyboardRef = useRef<KeyboardSensor | null>(null);
 
   useEffect(() => {
     if (!selectedRouteId) return;
@@ -160,6 +167,7 @@ export default function App() {
       controllerRef.current?.reset(route.points[0]);
     };
     keyboard.start();
+    keyboardRef.current = keyboard;
     sensorRef.current = keyboard;
 
     let rafId = 0;
@@ -195,6 +203,8 @@ export default function App() {
     return () => {
       cancelAnimationFrame(rafId);
       keyboard.stop();
+      keyboardRef.current = null;
+      virtualRef.current?.stop();
       serialRef.current?.stop();
     };
   }, [route, selectedRouteId]);
@@ -203,12 +213,54 @@ export default function App() {
     try {
       const serial = new SerialSensor();
       await serial.start();
+      virtualRef.current?.stop();
       serialRef.current = serial;
       sensorRef.current = serial;
       setSensorMode("serial");
     } catch (e) {
       alert((e as Error).message);
     }
+  };
+
+  const useKeyboardSensor = () => {
+    virtualRef.current?.stop();
+    serialRef.current?.stop();
+    serialRef.current = null;
+    sensorRef.current = keyboardRef.current;
+    setSensorMode("keyboard");
+  };
+
+  const useVirtualEsp32 = () => {
+    serialRef.current?.stop();
+    serialRef.current = null;
+    const virtual = new VirtualEsp32Sensor();
+    virtual.start();
+    virtual.setTargetRpm(60);
+    virtualRef.current = virtual;
+    sensorRef.current = virtual;
+    setVirtualTargetRpm(60);
+    setVirtualConnected(true);
+    setSensorMode("virtual");
+  };
+
+  const adjustVirtualRpm = (delta: number) => {
+    const virtual = virtualRef.current;
+    if (!virtual) return;
+    virtual.adjustTargetRpm(delta);
+    setVirtualTargetRpm(virtual.getTargetRpm());
+  };
+
+  const stopVirtualPedaling = () => {
+    virtualRef.current?.setTargetRpm(0);
+    setVirtualTargetRpm(0);
+  };
+
+  const toggleVirtualConnection = () => {
+    const virtual = virtualRef.current;
+    if (!virtual) return;
+    const connected = !virtual.isConnected();
+    virtual.setConnected(connected);
+    setVirtualConnected(connected);
   };
 
   const selectRoute = (routeId: RouteId) => {
@@ -227,6 +279,8 @@ export default function App() {
     controllerRef.current = null;
     serialRef.current?.stop();
     serialRef.current = null;
+    virtualRef.current?.stop();
+    virtualRef.current = null;
     sensorRef.current = null;
     distanceRef.current = 0;
     setRoute(null);
@@ -235,6 +289,8 @@ export default function App() {
     setRouteType("");
     setSelectedRouteId(null);
     setSensorMode("keyboard");
+    setVirtualTargetRpm(0);
+    setVirtualConnected(true);
   };
 
   if (!selectedRouteId) {
@@ -312,7 +368,11 @@ export default function App() {
         </div>
         <div className="hud-row hud-sub">
           SV {hud.panoCount}回 / {STREET_VIEW_INTERVAL}m ｜{" "}
-          {sensorMode === "keyboard" ? "キーボード" : "ESP32"}
+          {sensorMode === "keyboard"
+            ? "キーボード"
+            : sensorMode === "virtual"
+              ? `仮想ESP32 ${virtualConnected ? "接続中" : "通信途絶"}`
+              : "ESP32"}
         </div>
         {mapsError && <div className="hud-row hud-error">{mapsError}</div>}
         {API_KEY && !mapsReady && !mapsError && (
@@ -320,9 +380,37 @@ export default function App() {
         )}
       </div>
 
+      {sensorMode === "virtual" && (
+        <div className="virtual-esp32-panel">
+          <div>
+            <strong>仮想ESP32</strong>
+            <span>目標 {virtualTargetRpm.toFixed(0)} RPM</span>
+          </div>
+          <div className="virtual-esp32-actions">
+            <button onClick={() => adjustVirtualRpm(-10)}>-10</button>
+            <button onClick={() => adjustVirtualRpm(10)}>+10</button>
+            <button onClick={stopVirtualPedaling}>停止</button>
+            <button
+              className={virtualConnected ? "danger-button" : ""}
+              onClick={toggleVirtualConnection}
+            >
+              {virtualConnected ? "通信途絶" : "再接続"}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="controls">
         <span>↑/↓: 速度 ｜ Space: 停止 ｜ R: リセット</span>
-        {SerialSensor.isSupported() && sensorMode === "keyboard" && (
+        {sensorMode !== "keyboard" && (
+          <button className="secondary-button" onClick={useKeyboardSensor}>
+            キーボード
+          </button>
+        )}
+        {sensorMode !== "virtual" && (
+          <button onClick={useVirtualEsp32}>仮想ESP32</button>
+        )}
+        {SerialSensor.isSupported() && sensorMode !== "serial" && (
           <button onClick={connectSerial}>ESP32接続</button>
         )}
         <button className="secondary-button" onClick={returnToRouteSelection}>
