@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import type { Route, RoutePoint, SensorAdapter } from "./types";
-import { parseRoute, totalDistance } from "./modules/routeLoader";
+import { totalDistance } from "./modules/routeLoader";
 import { getPointAtDistance } from "./modules/routeSampler";
 import { gradeFactor } from "./modules/grade";
 import { KeyboardSensor } from "./modules/sensorKeyboard";
@@ -11,7 +11,9 @@ import {
   StreetViewController,
   STREET_VIEW_INTERVAL,
 } from "./modules/streetViewController";
-import routeJson from "./data/routes/osaka-kyoto.sample.json";
+import { loadRouteFromKmzUrl } from "./modules/kmzRouteLoader";
+import { loadGoogleRoutesRoute } from "./modules/googleRoutesLoader";
+import routeKmzUrl from "../routes/sources/osaka-kyoto-yodogawa.kmz?url";
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
 
@@ -26,7 +28,9 @@ type Hud = {
 
 export default function App() {
   const svRef = useRef<HTMLDivElement>(null);
-  const [route] = useState<Route>(() => parseRoute(routeJson));
+  const [route, setRoute] = useState<Route | null>(null);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
   const [hud, setHud] = useState<Hud>({
     speedKmh: 0,
     rpm: 0,
@@ -44,9 +48,38 @@ export default function App() {
   const sensorRef = useRef<SensorAdapter | null>(null);
   const serialRef = useRef<SerialSensor | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleRoutesRoute()
+      .then((result) => {
+        if (!cancelled) {
+          setRoute(result.route);
+          setRouteNotice(result.notice);
+        }
+      })
+      .catch(async (routesError: Error) => {
+        try {
+          const fallbackRoute = await loadRouteFromKmzUrl(routeKmzUrl);
+          if (!cancelled) {
+            setRoute(fallbackRoute);
+            setRouteNotice(`Routes API失敗、KMZを使用: ${routesError.message}`);
+          }
+        } catch (kmzError) {
+          if (!cancelled) {
+            setRouteError(
+              `${routesError.message} / ${(kmzError as Error).message}`
+            );
+          }
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
-    if (!API_KEY) return;
+    if (!API_KEY || !route) return;
     let cancelled = false;
     loadMapsApi(API_KEY)
       .then(() => {
@@ -60,11 +93,13 @@ export default function App() {
       .catch((e: Error) => setMapsError(e.message));
     return () => {
       cancelled = true;
+      controllerRef.current = null;
     };
   }, [route]);
 
   // センサー＋走行ループ
   useEffect(() => {
+    if (!route) return;
     const keyboard = new KeyboardSensor();
     keyboard.onReset = () => {
       distanceRef.current = 0;
@@ -121,6 +156,17 @@ export default function App() {
     }
   };
 
+  if (!route) {
+    return (
+      <div className="app">
+        <div className="placeholder">
+          <h2>{routeError ? "ルート読み込み失敗" : "ルート生成中…"}</h2>
+          {routeError && <p>{routeError}</p>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       {API_KEY ? (
@@ -154,6 +200,7 @@ export default function App() {
           {sensorMode === "keyboard" ? "キーボード" : "ESP32"}
         </div>
         {mapsError && <div className="hud-row hud-error">{mapsError}</div>}
+        {routeNotice && <div className="hud-row hud-error">{routeNotice}</div>}
         {API_KEY && !mapsReady && !mapsError && (
           <div className="hud-row hud-sub">Street View 読み込み中…</div>
         )}

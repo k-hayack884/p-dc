@@ -3,7 +3,7 @@
 エアロバイクを漕ぐと Google Street View が進む、屋内ダイエット用の個人プロトタイプ。
 詳細は設計仕様書（aerobike_streetview_design_spec.docx）を参照。
 
-現在の実装状態: **Phase 1 MVP**（キーボード入力・サンプルルート・100m更新・HUD）＋ Phase 2 準備（Web Serial / ESP32ファームウェア雛形）
+現在の実装状態: **Phase 1 MVP**（キーボード入力・KMZルート・100m更新・HUD）＋ Phase 2 準備（Web Serial / ESP32ファームウェア雛形）
 
 ## セットアップ
 
@@ -20,6 +20,20 @@ npm run dev
 1. Google Cloud Console でプロジェクト作成、**Maps JavaScript API** を有効化
 2. **予算アラートとクォータ制限を必ず設定**（仕様書 7章・10章）
 3. `.env.local` の `VITE_GOOGLE_MAPS_API_KEY` に記入
+4. Routes API を有効化し、`GOOGLE_ROUTES_API_KEY` にサーバー側キーを記入
+
+Routes API有効化:
+https://console.cloud.google.com/apis/library/routes.googleapis.com
+
+起動時は Routes API で以下の自転車ルートを生成する。
+
+- 出発地: 新大阪駅
+- 中間地点: 蒲生四丁目駅
+- 目的地: 奈良駅
+
+Routes APIが失敗した場合は、既存KMZルートへフォールバックする。
+Google Routes APIが自転車経路を返さない地域では徒歩経路を代用し、
+画面上に警告を表示する。徒歩経路には歩行者専用区間が含まれる可能性がある。
 
 Street View 更新は100mごと（`STREET_VIEW_INTERVAL`）。毎日1時間・月450km走行でも Dynamic Street View の無料枠（月5,000回）内に収まる設計。
 
@@ -39,6 +53,9 @@ src/
   types.ts                       RoutePoint / Route / SensorAdapter 型
   modules/
     routeLoader.ts               ルートJSON読み込み・検証
+    kmzRouteLoader.ts            KMZ展開・KML解析・50m再サンプリング
+    googleRoutesLoader.ts        Routes API polyline読込・デコード
+    routeGeometry.ts             座標列から50mルート点を生成
     routeSampler.ts              累積距離 → ルート上の現在点（補間）
     streetViewController.ts      Maps APIロード・100m更新・近傍探索
     sensorKeyboard.ts            キーボード疑似入力（Phase 1）
@@ -46,6 +63,8 @@ src/
     grade.ts                     RPM→速度変換・勾配補正係数
   data/routes/
     osaka-kyoto.sample.json      サンプルルート（約11.7km・50m間隔・232点）
+routes/sources/
+  osaka-kyoto-yodogawa.kmz       起動時に読み込む大阪→京都ルート
 firmware/
   esp32-rpm/esp32-rpm.ino        ホールセンサーRPM計測（"RPM:72.5"を毎秒出力）
 ```
@@ -64,6 +83,8 @@ type RoutePoint = {
 ```
 
 ※ サンプルルートの標高・勾配は合成値。Phase 4 でルート作成ツール（GPX読み込み＋Elevation API）に置き換える。
+
+現在のKMZは標高値がすべて0のため、KMZルート走行時の標高・勾配表示は0になる。
 
 ## ロードマップ（仕様書 9章）
 

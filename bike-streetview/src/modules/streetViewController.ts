@@ -4,18 +4,36 @@ import type { RoutePoint } from "../types";
 export const STREET_VIEW_INTERVAL = 100;
 
 let mapsApiPromise: Promise<typeof google> | null = null;
+const MAPS_CALLBACK_NAME = "__bikeStreetViewMapsReady";
+
+type MapsWindow = Window &
+  typeof globalThis & {
+    [MAPS_CALLBACK_NAME]?: () => void;
+  };
 
 /** Maps JavaScript API を動的ロードする */
 export function loadMapsApi(apiKey: string): Promise<typeof google> {
+  if (window.google?.maps?.StreetViewPanorama) {
+    return Promise.resolve(window.google);
+  }
   if (mapsApiPromise) return mapsApiPromise;
+
   mapsApiPromise = new Promise((resolve, reject) => {
+    const mapsWindow = window as MapsWindow;
     const script = document.createElement("script");
     script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
       apiKey
-    )}&v=weekly`;
+    )}&v=weekly&loading=async&callback=${MAPS_CALLBACK_NAME}`;
     script.async = true;
-    script.onload = () => resolve(google);
-    script.onerror = () => reject(new Error("Maps JavaScript APIのロードに失敗しました"));
+    mapsWindow[MAPS_CALLBACK_NAME] = () => {
+      delete mapsWindow[MAPS_CALLBACK_NAME];
+      resolve(window.google);
+    };
+    script.onerror = () => {
+      delete mapsWindow[MAPS_CALLBACK_NAME];
+      mapsApiPromise = null;
+      reject(new Error("Maps JavaScript APIのロードに失敗しました"));
+    };
     document.head.appendChild(script);
   });
   return mapsApiPromise;
