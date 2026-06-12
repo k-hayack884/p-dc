@@ -5,6 +5,9 @@
 
 現在の実装状態: **Phase 1 MVP**（キーボード入力・KMZルート・100m更新・HUD）＋ Phase 2 準備（Web Serial / ESP32ファームウェア雛形）
 
+チームメンバー向けの概要・セットアップ・共有時の注意事項は
+[`README_TEAM.md`](./README_TEAM.md)を参照。
+
 ## セットアップ
 
 ```bash
