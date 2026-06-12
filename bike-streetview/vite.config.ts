@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { defineConfig, loadEnv, type Plugin } from "vite";
+import { loadEnv, type Plugin } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 type ComputeRoutesResponse = {
@@ -348,5 +349,9 @@ export default defineConfig(({ mode }) => {
         !routesApiKey && Boolean(fallbackMapsApiKey)
       ),
     ],
+    test: {
+      environment: "jsdom",
+      restoreMocks: true,
+    },
   };
 });

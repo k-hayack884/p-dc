@@ -15,6 +15,12 @@ npm run dev
 
 ブラウザは **デスクトップChrome系** を使用すること（Web Serial対応のため）。
 
+自動テスト:
+
+```bash
+npm test
+```
+
 ### Google Maps APIキー
 
 1. Google Cloud Console でプロジェクト作成、**Maps JavaScript API** を有効化
