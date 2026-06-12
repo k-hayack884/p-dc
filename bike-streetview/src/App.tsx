@@ -99,6 +99,7 @@ export default function App() {
   const [sensorMode, setSensorMode] = useState<SensorMode>("keyboard");
   const [virtualTargetRpm, setVirtualTargetRpm] = useState(0);
   const [virtualConnected, setVirtualConnected] = useState(true);
+  const [resetConfirmationOpen, setResetConfirmationOpen] = useState(false);
 
   const distanceRef = useRef(0);
   const controllerRef = useRef<StreetViewController | null>(null);
@@ -203,9 +204,7 @@ export default function App() {
     if (!route) return;
     const keyboard = new KeyboardSensor();
     keyboard.onReset = () => {
-      distanceRef.current = 0;
-      if (selectedRouteId) clearRouteProgress(selectedRouteId);
-      controllerRef.current?.reset(route.points[0]);
+      setResetConfirmationOpen(true);
     };
     keyboard.start();
     keyboardRef.current = keyboard;
@@ -347,6 +346,18 @@ export default function App() {
     setSensorMode("keyboard");
     setVirtualTargetRpm(0);
     setVirtualConnected(true);
+    setResetConfirmationOpen(false);
+  };
+
+  const confirmReset = () => {
+    if (!route) return;
+    distanceRef.current = 0;
+    if (selectedRouteId) clearRouteProgress(selectedRouteId);
+    keyboardRef.current?.stopPedaling();
+    virtualRef.current?.setTargetRpm(0);
+    setVirtualTargetRpm(0);
+    controllerRef.current?.reset(route.points[0]);
+    setResetConfirmationOpen(false);
   };
 
   if (!selectedRouteId && creatingRoute) {
@@ -512,6 +523,38 @@ export default function App() {
       </div>
 
       <div className="route-name">{route.name}</div>
+
+      {resetConfirmationOpen && (
+        <div
+          className="reset-dialog-backdrop"
+          role="presentation"
+          onClick={() => setResetConfirmationOpen(false)}
+        >
+          <div
+            className="reset-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="reset-dialog-title">走行をリセットしますか？</h2>
+            <p>
+              現在位置をルートの最初に戻し、保存済みの走行進捗を削除します。
+            </p>
+            <div className="reset-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setResetConfirmationOpen(false)}
+              >
+                キャンセル
+              </button>
+              <button className="danger-button" onClick={confirmReset}>
+                リセットする
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

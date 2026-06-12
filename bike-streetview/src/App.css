@@ -407,6 +407,62 @@
   z-index: 10;
 }
 
+.reset-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(3px);
+}
+
+.reset-dialog {
+  width: min(420px, 100%);
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  color: #fff;
+  background: #17202b;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.reset-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 21px;
+}
+
+.reset-dialog p {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.reset-dialog-actions {
+  margin-top: 22px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.reset-dialog-actions button {
+  padding: 9px 16px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+}
+
+.reset-dialog-actions .secondary-button {
+  background: #475569;
+}
+
+.reset-dialog-actions .danger-button {
+  background: #dc2626;
+}
+
 @media (max-width: 640px) {
   .route-options {
     grid-template-columns: 1fr;

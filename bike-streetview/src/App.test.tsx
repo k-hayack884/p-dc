@@ -9,6 +9,10 @@ import {
   vi,
 } from "vitest";
 import App from "./App";
+import {
+  loadRouteProgress,
+  saveRouteProgress,
+} from "./modules/routeProgress";
 
 vi.mock("./modules/kmzRouteLoader", () => ({
   loadRouteFromKmzUrl: vi.fn().mockResolvedValue({
@@ -46,6 +50,7 @@ describe("Appのルート画面遷移", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
+    window.localStorage.clear();
     vi.stubGlobal("requestAnimationFrame", () => 1);
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
   });
@@ -93,6 +98,59 @@ describe("Appのルート画面遷移", () => {
       container.querySelector<HTMLElement>(".route-selection-panel");
     expect(selectionPanel).not.toBe(runningFirstChild);
     expect(selectionPanel?.style.background).toBe("");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("リセット確認で承認するまで進捗を削除しない", async () => {
+    saveRouteProgress("osaka-kyoto", 500);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+    const routeButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".route-option")
+    ).find((button) => button.textContent?.includes("大阪・淀川"));
+
+    await act(async () => {
+      routeButton?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector(".app")).not.toBeNull();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "R" }));
+    });
+
+    expect(
+      container.querySelector('[role="dialog"]')
+    ).not.toBeNull();
+    expect(loadRouteProgress("osaka-kyoto")).toBe(500);
+
+    const cancelButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "キャンセル");
+    await act(async () => {
+      cancelButton?.click();
+    });
+    expect(loadRouteProgress("osaka-kyoto")).toBe(500);
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "R" }));
+    });
+    const resetButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "リセットする");
+    await act(async () => {
+      resetButton?.click();
+    });
+
+    expect(loadRouteProgress("osaka-kyoto")).toBe(0);
 
     await act(async () => {
       root.unmount();

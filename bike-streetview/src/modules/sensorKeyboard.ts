@@ -10,7 +10,7 @@ export class KeyboardSensor implements SensorAdapter {
   private readonly stepKmh: number;
   private readonly maxKmh: number;
   private handler = (e: KeyboardEvent) => this.onKey(e);
-  /** Rキー押下時に呼ばれる（走行リセット用） */
+  /** Rキー押下時に呼ばれる（確認画面の表示用） */
   onReset?: () => void;
 
   constructor(stepKmh = 1, maxKmh = 45) {
@@ -42,7 +42,8 @@ export class KeyboardSensor implements SensorAdapter {
         break;
       case "r":
       case "R":
-        this.speedKmh = 0;
+        e.preventDefault();
+        if (e.repeat) break;
         this.onReset?.();
         break;
     }
@@ -54,5 +55,9 @@ export class KeyboardSensor implements SensorAdapter {
 
   getRpm(): number {
     return speedMpsToRpm(this.getSpeedMps());
+  }
+
+  stopPedaling(): void {
+    this.speedKmh = 0;
   }
 }
