@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32 Setup Checklist</title>
+    <style>
+      body {
+        max-width: 880px;
+        margin: 24px auto;
+        padding: 0 18px 48px;
+        color: #eee;
+        background: #111;
+        font-family: system-ui, sans-serif;
+      }
+
+      a {
+        color: #93c5fd;
+      }
+
+      h1 {
+        margin-bottom: 8px;
+      }
+
+      section {
+        margin-top: 26px;
+        padding: 18px;
+        border: 1px solid #334155;
+        border-radius: 14px;
+        background: #17202b;
+      }
+
+      label {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 8px 0;
+        line-height: 1.5;
+        cursor: pointer;
+      }
+
+      input[type="checkbox"] {
+        width: 20px;
+        height: 20px;
+        margin-top: 1px;
+        accent-color: #2563eb;
+      }
+
+      code {
+        padding: 2px 5px;
+        border-radius: 5px;
+        background: #0f172a;
+      }
+
+      .actions {
+        position: sticky;
+        bottom: 12px;
+        margin-top: 28px;
+        padding: 12px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        border: 1px solid #334155;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.9);
+        backdrop-filter: blur(6px);
+      }
+
+      button {
+        padding: 8px 14px;
+        border: 0;
+        border-radius: 999px;
+        color: #fff;
+        background: #2563eb;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: #475569;
+      }
+    </style>
+  </head>
+  <body>
+    <p><a href="./index.html">← Web Serialテストへ戻る</a></p>
+    <h1>ESP32実機TODO</h1>
+    <p>
+      チェック状態はこのブラウザの<code>localStorage</code>に保存されます。
+    </p>
+
+    <section>
+      <h2>Arduino IDE</h2>
+      <label><input type="checkbox" data-id="ide-install" />Arduino IDE 2.xをMacにインストールする</label>
+      <label><input type="checkbox" data-id="ide-settings" /><code>⌘ + ,</code>でSettingsを開く</label>
+      <label><input type="checkbox" data-id="board-url" />Additional Boards Manager URLsにESP32 URLを追加する</label>
+      <label><input type="checkbox" data-id="esp32-package" />Boards Managerで<code>esp32 by Espressif Systems</code>をインストールする</label>
+      <label><input type="checkbox" data-id="board-select" />Boardを<code>ESP32 Dev Module</code>にする</label>
+      <label><input type="checkbox" data-id="port-select" />ESP32をUSB接続してPortを選ぶ</label>
+    </section>
+
+    <section>
+      <h2>ファームウェア書き込み</h2>
+      <label><input type="checkbox" data-id="open-ino" /><code>firmware/esp32_hall_rpm/esp32_hall_rpm.ino</code>を開く</label>
+      <label><input type="checkbox" data-id="upload-ino" />ESP32へUploadする</label>
+      <label><input type="checkbox" data-id="serial-monitor" />Serial Monitorを<code>115200 baud</code>で開く</label>
+      <label><input type="checkbox" data-id="boot-json" /><code>{"status":"boot","message":"esp32_hall_rpm_ready"}</code>を確認する</label>
+    </section>
+
+    <section>
+      <h2>配線</h2>
+      <label><input type="checkbox" data-id="usb-off" />ESP32のUSBを一度抜く</label>
+      <label><input type="checkbox" data-id="wire-gnd" />KY-003の<code>-</code>をESP32の<code>GND</code>へ接続する</label>
+      <label><input type="checkbox" data-id="wire-3v3" />KY-003の<code>+</code>をESP32の<code>3V3</code>へ接続する</label>
+      <label><input type="checkbox" data-id="wire-gpio27" />KY-003の<code>S</code>をESP32の<code>GPIO27</code>へ接続する</label>
+      <label><input type="checkbox" data-id="usb-on" />ESP32をUSBで再接続する</label>
+      <label><input type="checkbox" data-id="magnet-test" />磁石を近づけてNDJSONの<code>pulses</code>と<code>rpm</code>が変わることを確認する</label>
+    </section>
+
+    <section>
+      <h2>Web Serialテスト</h2>
+      <label><input type="checkbox" data-id="open-test" /><code>http://localhost:5173</code>をChromeで開く</label>
+      <label><input type="checkbox" data-id="connect-test" /><code>Connect ESP32</code>を押してシリアルポートを選ぶ</label>
+      <label><input type="checkbox" data-id="rpm-ui" />磁石を近づけてRPM表示が変わることを確認する</label>
+      <label><input type="checkbox" data-id="distance-ui" /><code>speedFactor</code>に応じて速度・距離が増えることを確認する</label>
+    </section>
+
+    <section>
+      <h2>本体アプリ</h2>
+      <label><input type="checkbox" data-id="app-dev" /><code>npm run dev</code>で本体アプリを起動する</label>
+      <label><input type="checkbox" data-id="app-route" />ルートを選択する</label>
+      <label><input type="checkbox" data-id="app-serial" /><code>ESP32接続</code>を押してシリアルポートを選ぶ</label>
+      <label><input type="checkbox" data-id="app-rpm" />HUDのRPMが変わることを確認する</label>
+      <label><input type="checkbox" data-id="app-streetview" />走行距離に応じてStreet Viewが進むことを確認する</label>
+    </section>
+
+    <section>
+      <h2>注意</h2>
+      <label><input type="checkbox" data-id="safe-3v3" />KY-003は最初は必ず<code>3V3</code>給電にする</label>
+      <label><input type="checkbox" data-id="safe-5v" />5V給電する場合でもESP32 GPIOへ5V信号を直結しない</label>
+      <label><input type="checkbox" data-id="boot-button" />Uploadが止まる場合は<code>BOOT</code>ボタンを押しながら試す</label>
+      <label><input type="checkbox" data-id="polarity" />反応しない場合は磁石の表裏、配線、GPIO27を確認する</label>
+    </section>
+
+    <div class="actions">
+      <span id="progress">0 / 0 完了</span>
+      <button class="secondary" id="reset">チェックを全解除</button>
+    </div>
+
+    <script>
+      const storageKey = "bike-streetview:esp32-checklist";
+      const checkboxes = [...document.querySelectorAll("input[type='checkbox']")];
+      const progress = document.getElementById("progress");
+      const resetButton = document.getElementById("reset");
+
+      function loadState() {
+        try {
+          return JSON.parse(localStorage.getItem(storageKey) || "{}");
+        } catch {
+          return {};
+        }
+      }
+
+      function saveState() {
+        const state = {};
+        for (const checkbox of checkboxes) {
+          state[checkbox.dataset.id] = checkbox.checked;
+        }
+        localStorage.setItem(storageKey, JSON.stringify(state));
+      }
+
+      function updateProgress() {
+        const done = checkboxes.filter((checkbox) => checkbox.checked).length;
+        progress.textContent = `${done} / ${checkboxes.length} 完了`;
+      }
+
+      const state = loadState();
+      for (const checkbox of checkboxes) {
+        checkbox.checked = Boolean(state[checkbox.dataset.id]);
+        checkbox.addEventListener("change", () => {
+          saveState();
+          updateProgress();
+        });
+      }
+      resetButton.addEventListener("click", () => {
+        for (const checkbox of checkboxes) checkbox.checked = false;
+        saveState();
+        updateProgress();
+      });
+      updateProgress();
+    </script>
+  </body>
+</html>

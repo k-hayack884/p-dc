@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32 Bike RPM Web Serial Test</title>
+    <style>
+      body {
+        margin: 24px;
+        color: #eee;
+        background: #111;
+        font-family: system-ui, sans-serif;
+      }
+
+      button {
+        margin-right: 8px;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 999px;
+        color: #fff;
+        background: #2563eb;
+        font-size: 18px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .meter {
+        margin-top: 24px;
+        font-size: 48px;
+        font-weight: 700;
+      }
+
+      label {
+        display: block;
+        margin-top: 16px;
+      }
+
+      input {
+        width: 80px;
+        padding: 6px 8px;
+        color: #fff;
+        background: #222;
+        border: 1px solid #555;
+        border-radius: 8px;
+      }
+
+      pre {
+        height: 300px;
+        margin-top: 20px;
+        padding: 16px;
+        overflow: auto;
+        color: #dbeafe;
+        background: #222;
+        border-radius: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ESP32 Bike RPM Web Serial Test</h1>
+    <p><a href="./checklist.html">ESP32実機TODOチェックリストを開く</a></p>
+
+    <button id="connect">Connect ESP32</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <button id="resetDistance">Reset distance</button>
+
+    <div class="meter">RPM: <span id="rpm">--</span></div>
+    <p>Pulses/s: <span id="pulses">--</span></p>
+    <p>Timestamp: <span id="timestamp">--</span></p>
+    <p>Speed: <span id="speed">--</span> km/h</p>
+    <p>Distance: <span id="distance">0.0</span> m</p>
+    <label>
+      speedFactor:
+      <input id="speedFactor" type="number" value="0.2" min="0" step="0.01" />
+    </label>
+
+    <pre id="log"></pre>
+
+    <script>
+      const connectButton = document.getElementById("connect");
+      const disconnectButton = document.getElementById("disconnect");
+      const resetDistanceButton = document.getElementById("resetDistance");
+      const rpmEl = document.getElementById("rpm");
+      const pulsesEl = document.getElementById("pulses");
+      const timestampEl = document.getElementById("timestamp");
+      const speedEl = document.getElementById("speed");
+      const distanceEl = document.getElementById("distance");
+      const speedFactorEl = document.getElementById("speedFactor");
+      const logEl = document.getElementById("log");
+
+      let port = null;
+      let reader = null;
+      let keepReading = false;
+      let distanceM = 0;
+      let lastSampleAt = 0;
+
+      function log(message) {
+        logEl.textContent += message + "\n";
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function applyData(data) {
+        if (typeof data.rpm === "number") {
+          rpmEl.textContent = data.rpm.toFixed(1);
+          const now = performance.now();
+          const elapsedSeconds = lastSampleAt
+            ? Math.min((now - lastSampleAt) / 1000, 3)
+            : 0;
+          lastSampleAt = now;
+          const speedFactor = Number(speedFactorEl.value) || 0;
+          const speedKmh = data.rpm * speedFactor;
+          const speedMps = (speedKmh * 1000) / 3600;
+          distanceM += speedMps * elapsedSeconds;
+          speedEl.textContent = speedKmh.toFixed(1);
+          distanceEl.textContent = distanceM.toFixed(1);
+        }
+        if (typeof data.pulses === "number") {
+          pulsesEl.textContent = String(data.pulses);
+        }
+        if (typeof data.timestamp_ms === "number") {
+          timestampEl.textContent = String(data.timestamp_ms);
+        }
+      }
+
+      async function disconnect() {
+        keepReading = false;
+        await reader?.cancel().catch(() => {});
+        reader = null;
+        await port?.close().catch(() => {});
+        port = null;
+        connectButton.disabled = false;
+        disconnectButton.disabled = true;
+        log("Serial port closed.");
+      }
+
+      connectButton.addEventListener("click", async () => {
+        if (!("serial" in navigator)) {
+          alert("このブラウザはWeb Serial APIに対応していません。Chromeで試してください。");
+          return;
+        }
+
+        try {
+          port = await navigator.serial.requestPort();
+          await port.open({ baudRate: 115200 });
+
+          connectButton.disabled = true;
+          disconnectButton.disabled = false;
+          keepReading = true;
+          log("Serial port opened.");
+
+          const decoder = new TextDecoder();
+          reader = port.readable.getReader();
+          let buffer = "";
+
+          while (keepReading) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+
+              log(trimmed);
+
+              try {
+                applyData(JSON.parse(trimmed));
+              } catch {
+                log("WARN: JSON parse skipped");
+              }
+            }
+          }
+        } catch (error) {
+          console.error(error);
+          log(`ERROR: ${error.message}`);
+          await disconnect();
+        }
+      });
+
+      disconnectButton.addEventListener("click", disconnect);
+      resetDistanceButton.addEventListener("click", () => {
+        distanceM = 0;
+        lastSampleAt = 0;
+        distanceEl.textContent = "0.0";
+      });
+    </script>
+  </body>
+</html>
