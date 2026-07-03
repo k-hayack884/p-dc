@@ -8,9 +8,25 @@ export type Esp32SerialSample = {
 };
 
 const MAX_RPM = 240;
+const RPM_CHANGE_PER_SECOND = 45;
 
 function clampRpm(rpm: number): number {
   return Math.min(MAX_RPM, Math.max(0, rpm));
+}
+
+export function smoothRpmTowardTarget(
+  currentRpm: number,
+  targetRpm: number,
+  elapsedSeconds: number,
+  rpmChangePerSecond = RPM_CHANGE_PER_SECOND
+): number {
+  const safeElapsedSeconds = Math.max(0, Math.min(elapsedSeconds, 0.5));
+  const difference = targetRpm - currentRpm;
+  const maxChange = rpmChangePerSecond * safeElapsedSeconds;
+  if (Math.abs(difference) <= maxChange) {
+    return targetRpm;
+  }
+  return currentRpm + Math.sign(difference) * maxChange;
 }
 
 export function parseEsp32SerialLine(
@@ -60,7 +76,8 @@ export function parseEsp32SerialLine(
  * Chrome系デスクトップブラウザのみ対応。
  */
 export class SerialSensor implements SensorAdapter {
-  private rpm = 0;
+  private targetRpm = 0;
+  private currentRpm = 0;
   private pulses = 0;
   private esp32TimestampMs = 0;
   private port: SerialPort | null = null;
@@ -69,6 +86,7 @@ export class SerialSensor implements SensorAdapter {
   /** RPMが一定時間更新されない場合に0とみなす [ms] */
   private staleTimeoutMs = 3000;
   private lastUpdate = 0;
+  private lastSmoothUpdate = performance.now();
 
   static isSupported(): boolean {
     return typeof navigator !== "undefined" && "serial" in navigator;
@@ -81,6 +99,7 @@ export class SerialSensor implements SensorAdapter {
     this.port = await navigator.serial.requestPort();
     await this.port.open({ baudRate: 115200 });
     this.running = true;
+    this.lastSmoothUpdate = performance.now();
     void this.readLoop();
   }
 
@@ -99,7 +118,7 @@ export class SerialSensor implements SensorAdapter {
         for (const line of lines) {
           const sample = parseEsp32SerialLine(line);
           if (sample) {
-            this.rpm = sample.rpm;
+            this.targetRpm = sample.rpm;
             this.pulses = sample.pulses ?? this.pulses;
             this.esp32TimestampMs =
               sample.timestampMs ?? this.esp32TimestampMs;
@@ -117,12 +136,21 @@ export class SerialSensor implements SensorAdapter {
     void this.reader?.cancel();
     void this.port?.close();
     this.port = null;
-    this.rpm = 0;
+    this.targetRpm = 0;
+    this.currentRpm = 0;
   }
 
   getRpm(): number {
-    if (performance.now() - this.lastUpdate > this.staleTimeoutMs) return 0;
-    return this.rpm;
+    const now = performance.now();
+    const targetRpm =
+      now - this.lastUpdate > this.staleTimeoutMs ? 0 : this.targetRpm;
+    this.currentRpm = smoothRpmTowardTarget(
+      this.currentRpm,
+      targetRpm,
+      (now - this.lastSmoothUpdate) / 1000
+    );
+    this.lastSmoothUpdate = now;
+    return this.running ? this.currentRpm : 0;
   }
 
   getSpeedMps(): number {

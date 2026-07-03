@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseEsp32SerialLine } from "./sensorSerial";
+import {
+  parseEsp32SerialLine,
+  smoothRpmTowardTarget,
+} from "./sensorSerial";
 
 describe("parseEsp32SerialLine", () => {
   it("ESP32のNDJSONをRPMサンプルへ変換する", () => {
@@ -31,5 +34,16 @@ describe("parseEsp32SerialLine", () => {
   it("異常なRPMは安全範囲へ丸める", () => {
     expect(parseEsp32SerialLine('{"rpm":-10}')).toEqual({ rpm: 0 });
     expect(parseEsp32SerialLine('{"rpm":999}')).toEqual({ rpm: 240 });
+  });
+});
+
+describe("smoothRpmTowardTarget", () => {
+  it("RPMの段差を一定速度で追従させる", () => {
+    expect(smoothRpmTowardTarget(60, 120, 0.5)).toBe(82.5);
+    expect(smoothRpmTowardTarget(105, 120, 0.5)).toBe(120);
+  });
+
+  it("長い停止後でも1回の更新量を制限する", () => {
+    expect(smoothRpmTowardTarget(120, 0, 5)).toBe(97.5);
   });
 });
