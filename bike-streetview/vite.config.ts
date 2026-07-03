@@ -55,12 +55,14 @@ type RouteWaypoint =
 
 type CreateRouteRequest = {
   name?: string;
-  origin?: string;
-  destination?: string;
-  intermediates?: string[];
+  origin?: unknown;
+  destination?: unknown;
+  intermediates?: unknown;
   travelMode?: "AUTO" | RouteApiResult["travelMode"];
   includeElevation?: boolean;
 };
+
+class BadRouteRequestError extends Error {}
 
 const ROUTE_DEFINITIONS: Record<string, RouteDefinition> = {
   "shin-osaka-nara": {
@@ -146,9 +148,68 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 }
 
 function waypointBody(waypoint: RouteWaypoint): unknown {
-  return typeof waypoint === "string"
-    ? { address: waypoint }
-    : { location: { latLng: waypoint } };
+  if (typeof waypoint === "string") {
+    return { address: waypoint };
+  }
+
+  return {
+    location: {
+      latLng: {
+        latitude: waypoint.latitude,
+        longitude: waypoint.longitude,
+      },
+    },
+  };
+}
+
+function parseRouteWaypoint(
+  value: unknown,
+  fieldName: string
+): RouteWaypoint {
+  if (typeof value === "string") {
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
+      throw new BadRouteRequestError(`${fieldName}を入力してください`);
+    }
+    return trimmedValue;
+  }
+
+  if (value && typeof value === "object") {
+    const waypoint = value as Partial<{
+      latitude: unknown;
+      longitude: unknown;
+    }>;
+    if (
+      typeof waypoint.latitude === "number" &&
+      typeof waypoint.longitude === "number" &&
+      Number.isFinite(waypoint.latitude) &&
+      Number.isFinite(waypoint.longitude) &&
+      waypoint.latitude >= -90 &&
+      waypoint.latitude <= 90 &&
+      waypoint.longitude >= -180 &&
+      waypoint.longitude <= 180
+    ) {
+      return {
+        latitude: waypoint.latitude,
+        longitude: waypoint.longitude,
+      };
+    }
+  }
+
+  throw new BadRouteRequestError(
+    `${fieldName}は地名文字列または緯度経度で入力してください`
+  );
+}
+
+function parseRouteWaypointList(value: unknown): RouteWaypoint[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new BadRouteRequestError("経由地は配列で入力してください");
+  }
+
+  return value.map((waypoint, index) =>
+    parseRouteWaypoint(waypoint, `経由地${index + 1}`)
+  );
 }
 
 function routesApiPlugin(
@@ -179,11 +240,11 @@ function routesApiPlugin(
           if (isCustomRequest) {
             try {
               const body = (await readJsonBody(request)) as CreateRouteRequest;
-              const origin = body.origin?.trim();
-              const destination = body.destination?.trim();
-              const intermediates = body.intermediates
-                ?.map((value) => value.trim())
-                .filter(Boolean);
+              const origin = parseRouteWaypoint(body.origin, "出発地");
+              const destination = parseRouteWaypoint(body.destination, "目的地");
+              const intermediates = parseRouteWaypointList(
+                body.intermediates
+              );
 
               if (!origin || !destination) {
                 sendJson(response, 400, {
@@ -214,8 +275,13 @@ function routesApiPlugin(
                 includeElevation: body.includeElevation !== false,
               };
               requestedTravelMode = body.travelMode ?? "AUTO";
-            } catch {
-              sendJson(response, 400, { error: "リクエストJSONが不正です" });
+            } catch (error) {
+              sendJson(response, 400, {
+                error:
+                  error instanceof BadRouteRequestError
+                    ? error.message
+                    : "リクエストJSONが不正です",
+              });
               return;
             }
           } else {
@@ -259,28 +325,37 @@ function routesApiPlugin(
             }
 
             const computeRoute = async (
-              travelMode: RouteApiResult["travelMode"]
+              travelMode: RouteApiResult["travelMode"],
+              options: { preferFreeRoads?: boolean } = {}
             ): Promise<{
               response: Response;
               result: ComputeRoutesResponse;
             }> => {
+              const requestBody: Record<string, unknown> = {
+                origin: waypointBody(definition.origin),
+                destination: waypointBody(definition.destination),
+                intermediates: definition.intermediates?.map(waypointBody),
+                travelMode,
+                computeAlternativeRoutes: false,
+                polylineQuality: "HIGH_QUALITY",
+                polylineEncoding: "ENCODED_POLYLINE",
+                languageCode: "ja",
+                units: "METRIC",
+              };
+
+              if (travelMode === "DRIVE" && options.preferFreeRoads) {
+                requestBody.routeModifiers = {
+                  avoidTolls: true,
+                  avoidHighways: true,
+                };
+              }
+
               const routesResponse = await fetch(
                 "https://routes.googleapis.com/directions/v2:computeRoutes",
                 {
                   method: "POST",
                   headers,
-                  body: JSON.stringify({
-                    origin: waypointBody(definition.origin),
-                    destination: waypointBody(definition.destination),
-                    intermediates:
-                      definition.intermediates?.map(waypointBody),
-                    travelMode,
-                    computeAlternativeRoutes: false,
-                    polylineQuality: "HIGH_QUALITY",
-                    polylineEncoding: "ENCODED_POLYLINE",
-                    languageCode: "ja",
-                    units: "METRIC",
-                  }),
+                  body: JSON.stringify(requestBody),
                 }
               );
               return {
@@ -290,11 +365,36 @@ function routesApiPlugin(
               };
             };
 
+            const computeDriveRoute = async (): Promise<{
+              response: Response;
+              result: ComputeRoutesResponse;
+              usedFreeRoadsPreference: boolean;
+            }> => {
+              const freeRoads = await computeRoute("DRIVE", {
+                preferFreeRoads: true,
+              });
+              if (freeRoads.result.routes?.[0]?.polyline?.encodedPolyline) {
+                return {
+                  ...freeRoads,
+                  usedFreeRoadsPreference: true,
+                };
+              }
+
+              const fallback = await computeRoute("DRIVE");
+              return {
+                ...fallback,
+                usedFreeRoadsPreference: false,
+              };
+            };
+
             const primaryMode =
               requestedTravelMode === "AUTO"
                 ? "BICYCLE"
                 : requestedTravelMode;
-            const primary = await computeRoute(primaryMode);
+            const primary =
+              primaryMode === "DRIVE"
+                ? await computeDriveRoute()
+                : await computeRoute(primaryMode);
             if (!primary.response.ok) {
               sendJson(response, primary.response.status, {
                 error:
@@ -307,12 +407,16 @@ function routesApiPlugin(
             let route = primary.result.routes?.[0];
             let travelMode: RouteApiResult["travelMode"] = primaryMode;
             let warning: string | undefined;
+            let usedFreeRoadsPreference =
+              "usedFreeRoadsPreference" in primary
+                ? primary.usedFreeRoadsPreference
+                : false;
 
             if (
               requestedTravelMode === "AUTO" &&
               !route?.polyline?.encodedPolyline
             ) {
-              const drive = await computeRoute("DRIVE");
+              const drive = await computeDriveRoute();
               if (!drive.response.ok) {
                 sendJson(response, drive.response.status, {
                   error:
@@ -323,8 +427,14 @@ function routesApiPlugin(
               }
               route = drive.result.routes?.[0];
               travelMode = "DRIVE";
+              usedFreeRoadsPreference = drive.usedFreeRoadsPreference;
               warning =
-                "Google Routes APIで自転車経路が返らないため、車経路を代用しています。自転車が通行できない道路を含む可能性があります。";
+                usedFreeRoadsPreference
+                  ? "Google Routes APIで自転車経路が返らないため、無料道路優先の車経路を代用しています。自転車が通行できない道路を含む可能性があります。"
+                  : "Google Routes APIで自転車経路が返らないため、車経路を代用しています。無料道路優先では取得できなかったため、高速道路や有料道路を含む可能性があります。";
+            } else if (travelMode === "DRIVE" && !usedFreeRoadsPreference) {
+              warning =
+                "無料道路優先では車ルートを取得できなかったため、高速道路や有料道路を含む可能性があります。";
             }
 
             if (!route?.polyline?.encodedPolyline) {

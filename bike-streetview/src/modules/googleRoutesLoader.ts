@@ -14,11 +14,19 @@ export type GoogleRouteId = "shin-osaka-nara" | "esaka-minoh-kayano";
 
 export type GoogleTravelMode = "BICYCLE" | "DRIVE" | "WALK";
 
+export type RouteWaypointInput =
+  | string
+  | {
+      latitude: number;
+      longitude: number;
+      label?: string;
+    };
+
 export type CreateGoogleRouteRequest = {
   name: string;
-  origin: string;
-  destination: string;
-  intermediates: string[];
+  origin: RouteWaypointInput;
+  destination: RouteWaypointInput;
+  intermediates: RouteWaypointInput[];
   travelMode: GoogleTravelMode | "AUTO";
   includeElevation: boolean;
 };

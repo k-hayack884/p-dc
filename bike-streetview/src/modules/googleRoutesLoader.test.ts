@@ -50,4 +50,39 @@ describe("createGoogleRoutesRoute", () => {
     expect(result.route.name).toBe("徒歩テスト");
     expect(result.routeType).toBe("徒歩ルート");
   });
+
+  it("緯度経度の入力内容もPOSTできる", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          encodedPolyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+          travelMode: "DRIVE",
+        }),
+        { status: 200 }
+      )
+    );
+
+    const request = {
+      name: "座標テスト",
+      origin: { latitude: 34.75875, longitude: 135.49713 },
+      destination: { latitude: 34.83167, longitude: 135.48955 },
+      intermediates: [
+        {
+          latitude: 34.8,
+          longitude: 135.49,
+          label: "34.800000,135.490000",
+        },
+      ],
+      travelMode: "DRIVE" as const,
+      includeElevation: true,
+    };
+    await createGoogleRoutesRoute(request);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/routes/compute",
+      expect.objectContaining({
+        body: JSON.stringify(request),
+      })
+    );
+  });
 });
