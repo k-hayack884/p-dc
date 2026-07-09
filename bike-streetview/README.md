@@ -75,8 +75,9 @@ Routes APIが失敗した場合は、既存KMZルートへフォールバック�
 Google Routes APIが自転車経路を返さない地域では車経路を代用し、
 画面上に警告を表示する。車経路には自転車が通行できない道路が含まれる可能性がある。
 
-Street View 更新は100mごと（`STREET_VIEW_INTERVAL`）。毎日1時間・月450km走行でも Dynamic Street View の無料枠（月5,000回）内に収まる設計。
-Street View更新成功時にGeocoding APIで現在地を逆引きし、HUDへ都道府県・市区町村・町名まで表示する。
+Street View 更新は10km未満の短距離ルートでは50m、10km以上の長距離ルートでは100mごと。
+ルート一覧に当月のDynamic Street View無料枠（月5,000回）使用目安を表示するが、上限超過時も走行自体は止めない。
+Street View更新成功時にGeocoding APIで現在地を逆引きし、HUDへ都道府県・市区町村・町名まで表示する。住所取得は250mごとに間引く。
 
 ## 操作（キーボードテスト・仕様書 8章）
 

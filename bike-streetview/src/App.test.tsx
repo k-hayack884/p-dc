@@ -79,6 +79,7 @@ describe("Appのルート画面遷移", () => {
     window.localStorage.clear();
     vi.stubGlobal("requestAnimationFrame", () => 1);
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -469,6 +470,32 @@ describe("Appのルート画面遷移", () => {
     });
 
     expect(container.textContent).toContain("江坂 → 箕面萱野");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("ルート削除をキャンセルすると削除しない", async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    saveRouteProgress("esaka-minoh-kayano", 500);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="江坂 → 箕面萱野を削除"]'
+    );
+    expect(deleteButton).not.toBeNull();
+
+    await act(async () => {
+      deleteButton?.click();
+    });
+
+    expect(container.textContent).toContain("江坂 → 箕面萱野");
+    expect(loadRouteProgress("esaka-minoh-kayano")).toBe(500);
 
     await act(async () => {
       root.unmount();

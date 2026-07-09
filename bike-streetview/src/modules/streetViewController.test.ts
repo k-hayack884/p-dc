@@ -1,118 +1,710 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { StreetViewController } from "./streetViewController";
+import {
+  StreetViewController,
+  isNearTurn,
+  projectOntoRoute,
+} from "./streetViewController";
+import type { Route, RoutePoint } from "../types";
 
-describe("StreetViewController", () => {
-  const setPosition = vi.fn();
-  const setPov = vi.fn();
-  const setVisible = vi.fn();
-  const getPanorama = vi.fn();
+const METERS_PER_DEGREE_LAT = 111_320;
+const BASE_LAT = 34.7;
+const BASE_LNG = 135.5;
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubGlobal("google", {
-      maps: {
-        StreetViewSource: {
-          OUTDOOR: "outdoor",
-        },
-        StreetViewPanorama: vi.fn().mockImplementation(function () {
-          return {
-            setPosition,
-            setPov,
-            setVisible,
-          };
-        }),
-        StreetViewService: vi.fn().mockImplementation(function () {
-          return {
-            getPanorama,
-          };
-        }),
-      },
+/** ローカル座標（東x[m]・北y[m]）→ 緯度経度 */
+function toLatLng(xMeters: number, yMeters: number) {
+  const latScale = Math.cos((BASE_LAT * Math.PI) / 180);
+  return {
+    lat: BASE_LAT + yMeters / METERS_PER_DEGREE_LAT,
+    lng: BASE_LNG + xMeters / (METERS_PER_DEGREE_LAT * latScale),
+  };
+}
+
+/** 区間方位のリストから50m間隔のルートを作る */
+function makeRoute(segmentHeadings: number[], spacingM = 50): Route {
+  const points: RoutePoint[] = [];
+  let x = 0;
+  let y = 0;
+  points.push({
+    ...toLatLng(0, 0),
+    distance: 0,
+    elevation: 0,
+    grade: 0,
+    heading: segmentHeadings[0] ?? 0,
+  });
+  segmentHeadings.forEach((heading, index) => {
+    const rad = (heading * Math.PI) / 180;
+    x += Math.sin(rad) * spacingM;
+    y += Math.cos(rad) * spacingM;
+    points.push({
+      ...toLatLng(x, y),
+      distance: (index + 1) * spacingM,
+      elevation: 0,
+      grade: 0,
+      heading,
     });
   });
+  return { name: "test", intervalMeters: spacingM, points };
+}
 
-  it("初期表示時にも近傍のStreet Viewパノラマへ移動する", async () => {
-    const nearbyLatLng = {
-      lat: () => 34.701,
-      lng: () => 135.501,
-    };
-    getPanorama.mockResolvedValue({
-      data: {
-        location: {
-          latLng: nearbyLatLng,
-        },
-      },
+type GraphNode = {
+  x: number;
+  y: number;
+  links: Array<{ pano: string; heading: number }>;
+  /** 投稿パノラマを再現する場合に指定（例: "© Taro Yamada"） */
+  copyright?: string;
+  /** 屋内・地下パノラマを再現する場合にtrue（OUTDOOR検索に現れない） */
+  indoor?: boolean;
+};
+
+type PanoGraph = Record<string, GraphNode>;
+
+function latLngFns(xMeters: number, yMeters: number) {
+  const p = toLatLng(xMeters, yMeters);
+  return { lat: () => p.lat, lng: () => p.lng };
+}
+
+/**
+ * パノラマグラフを再現するモック。
+ * getPanoramaはpano ID指定（メタデータ・無課金）はグラフから自動応答し、
+ * location指定（再同期）はテストごとにlocationGetPanoramaへ委譲する。
+ */
+function setupMockMaps(graph: PanoGraph) {
+  const setVisible = vi.fn();
+  const setPano = vi.fn();
+  const setPosition = vi.fn();
+  const setPov = vi.fn();
+  const locationGetPanorama = vi.fn();
+  const panoramaConstructor = vi.fn();
+
+  const getPanorama = vi.fn(
+    async (request: {
+      pano?: string;
+      location?: { lat: number; lng: number };
+      radius?: number;
+    }) => {
+      if (request.pano !== undefined) {
+        const node = graph[request.pano];
+        if (!node) throw new Error("NOT_FOUND");
+        return {
+          data: {
+            location: { latLng: latLngFns(node.x, node.y) },
+            links: node.links,
+            copyright: node.copyright ?? "© Google",
+          },
+        };
+      }
+
+      // OUTDOOR屋外検証（半径10m）: 屋内ノードを除く最寄りノードを返す
+      if (request.location && request.radius === 10) {
+        const latScale = Math.cos((BASE_LAT * Math.PI) / 180);
+        let best: { id: string; node: GraphNode; d: number } | null = null;
+        for (const [id, node] of Object.entries(graph)) {
+          if (node.indoor) continue;
+          const p = toLatLng(node.x, node.y);
+          const d = Math.hypot(
+            (p.lat - request.location.lat) * METERS_PER_DEGREE_LAT,
+            (p.lng - request.location.lng) * METERS_PER_DEGREE_LAT * latScale
+          );
+          if (d <= 10 && (!best || d < best.d)) best = { id, node, d };
+        }
+        if (!best) throw new Error("ZERO_RESULTS");
+        return {
+          data: {
+            location: {
+              latLng: latLngFns(best.node.x, best.node.y),
+              pano: best.id,
+            },
+            links: best.node.links,
+            copyright: best.node.copyright ?? "© Google",
+          },
+        };
+      }
+
+      return locationGetPanorama(request);
+    }
+  );
+
+  const state: {
+    node: GraphNode | null;
+    position: { lat: number; lng: number } | null;
+    pov: { heading: number; pitch: number };
+    listeners: Record<string, Array<() => void>>;
+  } = {
+    node: null,
+    position: null,
+    pov: { heading: 0, pitch: 0 },
+    listeners: {},
+  };
+
+  const findNodeAt = (lat: number, lng: number): GraphNode | null => {
+    for (const node of Object.values(graph)) {
+      const p = toLatLng(node.x, node.y);
+      if (Math.abs(p.lat - lat) < 1e-7 && Math.abs(p.lng - lng) < 1e-7) {
+        return node;
+      }
+    }
+    return null;
+  };
+
+  const fire = (event: string) => {
+    queueMicrotask(() => {
+      for (const listener of state.listeners[event] ?? []) listener();
+    });
+  };
+
+  vi.stubGlobal("google", {
+    maps: {
+      StreetViewSource: { OUTDOOR: "outdoor" },
+      StreetViewPanorama: panoramaConstructor.mockImplementation(function (
+        _container: HTMLElement,
+        options: { pov?: { heading: number; pitch: number } }
+      ) {
+        if (options.pov) state.pov = options.pov;
+        return {
+          setVisible,
+          setPano: setPano.mockImplementation((panoId: string) => {
+            const node = graph[panoId];
+            if (node) {
+              state.node = node;
+              state.position = toLatLng(node.x, node.y);
+            }
+            fire("links_changed");
+          }),
+          setPosition: setPosition.mockImplementation(
+            (latLng: { lat: () => number; lng: () => number }) => {
+              state.position = { lat: latLng.lat(), lng: latLng.lng() };
+              state.node = findNodeAt(state.position.lat, state.position.lng);
+              fire("links_changed");
+            }
+          ),
+          getPosition: () => {
+            if (!state.position) return null;
+            const { lat, lng } = state.position;
+            return { lat: () => lat, lng: () => lng };
+          },
+          getLinks: () => state.node?.links ?? [],
+          getPov: () => state.pov,
+          setPov: setPov.mockImplementation(
+            (pov: { heading: number; pitch: number }) => {
+              state.pov = pov;
+            }
+          ),
+          addListener: (event: string, listener: () => void) => {
+            (state.listeners[event] ??= []).push(listener);
+            return {
+              remove: () => {
+                state.listeners[event] = (
+                  state.listeners[event] ?? []
+                ).filter((entry) => entry !== listener);
+              },
+            };
+          },
+        };
+      }),
+      StreetViewService: vi.fn().mockImplementation(function () {
+        return { getPanorama };
+      }),
+    },
+  });
+
+  return {
+    setVisible,
+    setPano,
+    setPosition,
+    setPov,
+    getPanorama,
+    locationGetPanorama,
+    panoramaConstructor,
+    state,
+  };
+}
+
+describe("projectOntoRoute", () => {
+  it("ルート線上へ投影して累積距離とずれを返す", () => {
+    const route = makeRoute([0, 0, 0, 0]); // 北へ200m
+    const projection = projectOntoRoute(route, toLatLng(10, 75), 50);
+    expect(projection.distanceM).toBeCloseTo(75, 0);
+    expect(projection.offsetM).toBeCloseTo(10, 0);
+  });
+});
+
+describe("isNearTurn", () => {
+  it("直線区間では曲がり角なしと判定する", () => {
+    const route = makeRoute([0, 0, 0, 0]);
+    expect(isNearTurn(route, 50)).toBe(false);
+  });
+
+  it("先読み範囲内に方位変化があれば曲がり角付近と判定する", () => {
+    const route = makeRoute([0, 0, 90, 90]); // 100m地点から東へ
+    expect(isNearTurn(route, 95)).toBe(true);
+    expect(isNearTurn(route, 20)).toBe(false);
+  });
+});
+
+describe("StreetViewController（リンク追従・ハイブリッド方式）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("初期表示時に近傍のStreet Viewパノラマへ再同期し、課金1回を通知する", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({ n0: { x: 0, y: 0, links: [] } });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) }, links: [{ heading: 2 }] },
     });
     const onPanoramaChanged = vi.fn();
 
-    new StreetViewController(
+    const controller = new StreetViewController(
       document.createElement("div"),
-      {
-        lat: 34.7,
-        lng: 135.5,
-        distance: 0,
-        elevation: 0,
-        grade: 0,
-        heading: 90,
-      },
+      route,
       0,
       onPanoramaChanged
     );
+    await expect(controller.ready).resolves.toBe(true);
 
-    await vi.waitFor(() => {
-      expect(getPanorama).toHaveBeenCalledWith({
-        location: { lat: 34.7, lng: 135.5 },
-        radius: 50,
-        source: "outdoor",
-      });
-      expect(setPosition).toHaveBeenCalledWith(nearbyLatLng);
+    expect(mocks.locationGetPanorama).toHaveBeenCalledWith({
+      location: { lat: route.points[0].lat, lng: route.points[0].lng },
+      radius: 50,
+      source: "outdoor",
     });
-    expect(setPov).toHaveBeenCalledWith({ heading: 90, pitch: 0 });
+    expect(mocks.panoramaConstructor).toHaveBeenCalledTimes(1);
+    expect(controller.panoBillingCount).toBe(1);
+    expect(mocks.setPosition).toHaveBeenCalledTimes(1);
     expect(onPanoramaChanged).toHaveBeenCalledWith(
-      0,
-      {
-        lat: 34.701,
-        lng: 135.501,
-      },
-      { syncDistance: true }
+      expect.any(Number),
+      { lat: route.points[0].lat, lng: route.points[0].lng },
+      { syncDistance: true, billed: true }
     );
   });
 
-  it("近傍50mで見つからない場合は探索半径を広げる", async () => {
-    const fallbackLatLng = {
-      lat: () => 34.702,
-      lng: () => 135.502,
-    };
-    getPanorama
+  it("初期50mで見つからない場合は探索半径を広げる", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({});
+    mocks.locationGetPanorama
       .mockRejectedValueOnce(new Error("ZERO_RESULTS"))
       .mockResolvedValueOnce({
-        data: {
-          location: {
-            latLng: fallbackLatLng,
-          },
-        },
+        data: { location: { latLng: latLngFns(0, 10) } },
       });
 
-    new StreetViewController(document.createElement("div"), {
-      lat: 34.7,
-      lng: 135.5,
-      distance: 0,
-      elevation: 0,
-      grade: 0,
-      heading: 90,
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await expect(controller.ready).resolves.toBe(true);
+
+    expect(mocks.locationGetPanorama).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ radius: 50 })
+    );
+    expect(mocks.locationGetPanorama).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ radius: 150 })
+    );
+  });
+
+  it("なめらかモード（既定）では1枚ずつsetPanoし移動アニメーションを見せる", async () => {
+    const route = makeRoute([0, 0, 0, 0]); // 北へ200m
+    const mocks = setupMockMaps({
+      n0: { x: 0, y: 0, links: [{ pano: "n1", heading: 0 }] },
+      n1: {
+        x: 0,
+        y: 10,
+        links: [
+          { pano: "n0", heading: 180 },
+          { pano: "n2", heading: 0 },
+        ],
+      },
+      n2: {
+        x: 0,
+        y: 20,
+        links: [{ pano: "n1", heading: 180 }],
+      },
     });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+
+    controller.setTarget(20);
 
     await vi.waitFor(() => {
-      expect(getPanorama).toHaveBeenNthCalledWith(1, {
-        location: { lat: 34.7, lng: 135.5 },
-        radius: 50,
-        source: "outdoor",
-      });
-      expect(getPanorama).toHaveBeenNthCalledWith(2, {
-        location: { lat: 34.7, lng: 135.5 },
-        radius: 150,
-        source: "outdoor",
-      });
-      expect(setPosition).toHaveBeenCalledWith(fallbackLatLng);
+      expect(mocks.setPano).toHaveBeenNthCalledWith(1, "n1");
+      expect(mocks.setPano).toHaveBeenNthCalledWith(2, "n2");
     });
+    expect(mocks.locationGetPanorama).not.toHaveBeenCalled();
+    expect(mocks.panoramaConstructor).toHaveBeenCalledTimes(1);
+  });
+
+  it("まとめ移動モードではリンク鎖をまとめて辿り、表示更新は1回にする", async () => {
+    const route = makeRoute([0, 0, 0, 0]); // 北へ200m
+    const mocks = setupMockMaps({
+      n0: { x: 0, y: 0, links: [{ pano: "n1", heading: 0 }] },
+      n1: {
+        x: 0,
+        y: 10,
+        links: [
+          { pano: "n0", heading: 180 },
+          { pano: "n2", heading: 0 },
+        ],
+      },
+      n2: {
+        x: 0,
+        y: 20,
+        links: [
+          { pano: "n1", heading: 180 },
+          { pano: "n3", heading: 0 },
+        ],
+      },
+      n3: {
+        x: 0,
+        y: 30,
+        links: [
+          { pano: "n2", heading: 180 },
+          { pano: "n4", heading: 0 },
+        ],
+      },
+      n4: {
+        x: 0,
+        y: 40,
+        links: [{ pano: "n3", heading: 180 }],
+      },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    controller.setMotionMode("hop");
+    mocks.locationGetPanorama.mockClear();
+
+    controller.setTarget(40);
+
+    await vi.waitFor(() => {
+      // n1〜n3はメタデータ検証のみで通過し、表示更新はn4への1回だけ
+      expect(mocks.setPano).toHaveBeenCalledTimes(1);
+      expect(mocks.setPano).toHaveBeenCalledWith("n4");
+    });
+    expect(mocks.locationGetPanorama).not.toHaveBeenCalled();
+    expect(mocks.panoramaConstructor).toHaveBeenCalledTimes(1);
+    expect(controller.panoBillingCount).toBe(1);
+  });
+
+  it("曲がり角付近では1枚ずつ、ルート先読み点に最も近いリンクを選ぶ", async () => {
+    // 北へ100m進んだ後、東へ曲がるルート
+    const route = makeRoute([0, 0, 90, 90]);
+    const mocks = setupMockMaps({
+      corner: {
+        x: 0,
+        y: 95,
+        links: [
+          { pano: "north", heading: 0 },
+          { pano: "east", heading: 90 },
+        ],
+      },
+      north: { x: 0, y: 105, links: [] },
+      east: { x: 10, y: 100, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 95) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      95
+    );
+    await controller.ready;
+
+    controller.setTarget(110);
+
+    await vi.waitFor(() => {
+      expect(mocks.setPano).toHaveBeenCalledWith("east");
+    });
+    expect(mocks.setPano).not.toHaveBeenCalledWith("north");
+    expect(mocks.setPano).toHaveBeenCalledTimes(1);
+  });
+
+  it("進行方向のリンクがない場合はsetPositionで再同期する（再生成なし）", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({
+      deadEnd: { x: 0, y: 0, links: [{ pano: "back", heading: 180 }] },
+      back: { x: 0, y: -10, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 50) } },
+    });
+
+    controller.setTarget(50);
+
+    await vi.waitFor(() => {
+      expect(mocks.locationGetPanorama).toHaveBeenCalledWith(
+        expect.objectContaining({ radius: 25 })
+      );
+      expect(mocks.setPosition).toHaveBeenCalledTimes(2);
+    });
+    expect(mocks.setPano).not.toHaveBeenCalled();
+    expect(mocks.panoramaConstructor).toHaveBeenCalledTimes(1);
+  });
+
+  it("投稿パノラマ（建物内など）は辿らず、次点の公式リンクを使う", async () => {
+    const route = makeRoute([0, 0, 0, 0]); // 北へ200m
+    const mocks = setupMockMaps({
+      n0: {
+        x: 0,
+        y: 0,
+        links: [
+          { pano: "indoor", heading: 0 }, // 進行方向に最も近いが投稿パノラマ
+          { pano: "official", heading: 10 },
+        ],
+      },
+      indoor: { x: 0, y: 10, links: [], copyright: "© Taro Yamada" },
+      official: { x: 2, y: 10, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+
+    controller.setTarget(10);
+
+    await vi.waitFor(() => {
+      expect(mocks.setPano).toHaveBeenCalledWith("official");
+    });
+    expect(mocks.setPano).not.toHaveBeenCalledWith("indoor");
+  });
+
+  it("投稿パノラマ形式のID（AF1Qip等）は著作権表示に関わらず辿らない", async () => {
+    const route = makeRoute([0, 0, 0, 0]);
+    const mocks = setupMockMaps({
+      n0: {
+        x: 0,
+        y: 0,
+        links: [
+          { pano: "AF1QipXYZ123", heading: 0 }, // ビジネスビュー等の投稿ID形式
+          { pano: "official", heading: 10 },
+        ],
+      },
+      AF1QipXYZ123: { x: 0, y: 10, links: [] }, // モック上は© Googleでも弾く
+      official: { x: 2, y: 10, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+
+    controller.setTarget(10);
+
+    await vi.waitFor(() => {
+      expect(mocks.setPano).toHaveBeenCalledWith("official");
+    });
+    expect(mocks.setPano).not.toHaveBeenCalledWith("AF1QipXYZ123");
+  });
+
+  it("屋内・地下パノラマ（地下街など）はOUTDOOR検証で棄却する", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({
+      n0: { x: 0, y: 0, links: [{ pano: "underground", heading: 0 }] },
+      // ルート直上・公式著作権だが地下街のパノラマ
+      underground: { x: 0, y: 10, links: [], indoor: true },
+      // 同じ場所の地上パノラマ（OUTDOOR検索はこちらを返す）
+      street: { x: 0, y: 11, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 30) } },
+    });
+
+    controller.setTarget(30);
+
+    await vi.waitFor(() => {
+      expect(mocks.locationGetPanorama).toHaveBeenCalled(); // 再同期へ
+    });
+    expect(mocks.setPano).not.toHaveBeenCalledWith("underground");
+  });
+
+  it("リンクの自称方向と実移動方位がずれるパノラマ（横ステップ）は辿らない", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({
+      n0: { x: 0, y: 0, links: [{ pano: "sideStep", heading: 0 }] },
+      // heading=0（北）を自称するが、実際の位置は真横（東15m）
+      sideStep: { x: 15, y: 1, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 50) } },
+    });
+
+    controller.setTarget(50);
+
+    await vi.waitFor(() => {
+      expect(mocks.locationGetPanorama).toHaveBeenCalled(); // 再同期へ
+    });
+    expect(mocks.setPano).not.toHaveBeenCalledWith("sideStep");
+  });
+
+  it("リンク先がルート外（公園・私道など）なら表示せずに再同期する", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({
+      n0: { x: 0, y: 0, links: [{ pano: "offRoute", heading: 0 }] },
+      // 方位は進行方向だが、実際は西へ50mずれた位置（公園内など）
+      offRoute: { x: -50, y: 10, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 50) } },
+    });
+
+    controller.setTarget(50);
+
+    await vi.waitFor(() => {
+      expect(mocks.locationGetPanorama).toHaveBeenCalledWith(
+        expect.objectContaining({ radius: 25 })
+      );
+    });
+    // ルート外パノラマは表示前に棄却される
+    expect(mocks.setPano).not.toHaveBeenCalledWith("offRoute");
+  });
+
+  it("再同期先が現在位置より後方なら表示しない（後退防止）", async () => {
+    const route = makeRoute([0, 0, 0, 0]);
+    const mocks = setupMockMaps({
+      isolated: { x: 0, y: 50, links: [] },
+    });
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 50) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      50
+    );
+    await controller.ready;
+    expect(mocks.setPosition).toHaveBeenCalledTimes(1);
+    mocks.locationGetPanorama.mockClear();
+    // 再同期先として後方（20m地点）のパノラマしか見つからないケース
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 20) } },
+    });
+
+    controller.setTarget(90);
+
+    await vi.waitFor(() => {
+      expect(mocks.locationGetPanorama).toHaveBeenCalled();
+    });
+    expect(mocks.setPosition).toHaveBeenCalledTimes(1); // 後退表示なし
+    expect(mocks.setPano).not.toHaveBeenCalled();
+  });
+
+  it("視線方向はStreet Viewの道路リンク方向に補正される", async () => {
+    const route = makeRoute([90, 90]);
+    const mocks = setupMockMaps({});
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: {
+        location: { latLng: latLngFns(0, 0) },
+        links: [{ heading: 88 }],
+      },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      0
+    );
+    await controller.ready;
+
+    expect(mocks.setPov).toHaveBeenLastCalledWith({ heading: 88, pitch: 0 });
+  });
+
+  it("リセット時は先頭へ再同期する（再生成なし）", async () => {
+    const route = makeRoute([0, 0]);
+    const mocks = setupMockMaps({});
+    mocks.locationGetPanorama.mockResolvedValue({
+      data: { location: { latLng: latLngFns(0, 0) } },
+    });
+
+    const controller = new StreetViewController(
+      document.createElement("div"),
+      route,
+      50
+    );
+    await controller.ready;
+    mocks.locationGetPanorama.mockClear();
+
+    controller.reset(0);
+    await expect(controller.ready).resolves.toBe(true);
+
+    expect(mocks.locationGetPanorama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        location: { lat: route.points[0].lat, lng: route.points[0].lng },
+      })
+    );
+    expect(mocks.panoramaConstructor).toHaveBeenCalledTimes(1);
   });
 });

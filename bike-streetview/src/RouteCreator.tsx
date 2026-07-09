@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type {
-  CreateGoogleRouteRequest,
-  GoogleTravelMode,
-} from "./modules/googleRoutesLoader";
+import type { CreateGoogleRouteRequest } from "./modules/googleRoutesLoader";
 import { createGoogleRoutesRoute } from "./modules/googleRoutesLoader";
 import {
   saveCustomRoute,
@@ -11,9 +8,7 @@ import {
 import { loadMapsApi } from "./modules/streetViewController";
 import {
   formatCoordinateText,
-  parseCoordinateText,
   parseRouteWaypointInput,
-  parseRouteWaypointLines,
   type LatLngInput,
 } from "./modules/routeWaypointInput";
 
@@ -23,24 +18,40 @@ type RouteCreatorProps = {
 };
 
 type MapPickTarget = "origin" | "destination" | "intermediate";
+
+type WaypointRow = {
+  id: string;
+  text: string;
+  /** 走行中ミニマップへ赤丸表示するか。ルート計算には常に使われる */
+  showOnMap: boolean;
+};
+
 type RouteCreatorFields = {
   origin: string;
   destination: string;
-  intermediates: string;
+  waypointRows: WaypointRow[];
 };
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
 const DEFAULT_MAP_CENTER = { lat: 34.6937, lng: 135.5023 };
 
+function newWaypointRowId(): string {
+  return `wp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
   const [name, setName] = useState("");
   const [origin, setOrigin] = useState("");
   const [destination, setDestination] = useState("");
-  const [intermediates, setIntermediates] = useState("");
+  const [waypointRows, setWaypointRows] = useState<WaypointRow[]>([]);
   const [travelMode, setTravelMode] =
-    useState<GoogleTravelMode | "AUTO">("AUTO");
+    useState<CreateGoogleRouteRequest["travelMode"]>("MAIN_ROAD");
   const [includeElevation, setIncludeElevation] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewSummary, setPreviewSummary] = useState<string | null>(null);
+  const [previewWarning, setPreviewWarning] = useState<string | null>(null);
+  const [autoPreviewTick, setAutoPreviewTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -50,11 +61,13 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
   const mapElementRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
+  const previewPolylineRef = useRef<google.maps.Polyline | null>(null);
+  const previewActiveRef = useRef(false);
   const mapPickTargetRef = useRef<MapPickTarget>(mapPickTarget);
   const routeFieldsRef = useRef<RouteCreatorFields>({
     origin,
     destination,
-    intermediates,
+    waypointRows,
   });
 
   useEffect(() => {
@@ -65,9 +78,13 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
     routeFieldsRef.current = {
       origin,
       destination,
-      intermediates,
+      waypointRows,
     };
-  }, [destination, intermediates, origin]);
+  }, [destination, origin, waypointRows]);
+
+  useEffect(() => {
+    previewActiveRef.current = previewSummary !== null;
+  }, [previewSummary]);
 
   useEffect(() => {
     if (!API_KEY || !mapElementRef.current) return;
@@ -115,11 +132,18 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
             return;
           }
 
-          setIntermediates((current) =>
-            current.trim()
-              ? `${current.trim()}\n${coordinateText}`
-              : coordinateText
-          );
+          setWaypointRows((current) => [
+            ...current,
+            {
+              id: newWaypointRowId(),
+              text: coordinateText,
+              showOnMap: true,
+            },
+          ]);
+          // プレビュー表示中にピンを置いたら自動で経路を引き直す
+          if (previewActiveRef.current) {
+            setAutoPreviewTick((tick) => tick + 1);
+          }
         });
 
         mapRef.current = map;
@@ -133,6 +157,8 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
       mounted = false;
       markersRef.current.forEach((marker) => marker.setMap(null));
       markersRef.current = [];
+      previewPolylineRef.current?.setMap(null);
+      previewPolylineRef.current = null;
     };
   }, []);
 
@@ -147,18 +173,19 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
       coordinate: LatLngInput;
     }> = [];
 
-    const originCoordinate = safeParseCoordinate(origin);
+    const originCoordinate = safeParseWaypointCoordinate(origin);
     if (originCoordinate) {
       points.push({ label: "S", coordinate: originCoordinate });
     }
 
-    parseIntermediateCoordinates(intermediates).forEach(
-      (coordinate, index) => {
+    waypointRows.forEach((row, index) => {
+      const coordinate = safeParseWaypointCoordinate(row.text);
+      if (coordinate) {
         points.push({ label: String(index + 1), coordinate });
       }
-    );
+    });
 
-    const destinationCoordinate = safeParseCoordinate(destination);
+    const destinationCoordinate = safeParseWaypointCoordinate(destination);
     if (destinationCoordinate) {
       points.push({ label: "G", coordinate: destinationCoordinate });
     }
@@ -184,7 +211,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
       return;
     }
 
-    if (points.length > 1) {
+    if (points.length > 1 && !previewActiveRef.current) {
       const bounds = new google.maps.LatLngBounds();
       points.forEach(({ coordinate }) => {
         bounds.extend({
@@ -194,7 +221,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
       });
       mapRef.current.fitBounds(bounds);
     }
-  }, [destination, intermediates, mapReady, origin]);
+  }, [destination, mapReady, origin, waypointRows]);
 
   const clearMapUndoStack = () => {
     setMapUndoStack([]);
@@ -207,10 +234,120 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
 
       setOrigin(previousFields.origin);
       setDestination(previousFields.destination);
-      setIntermediates(previousFields.intermediates);
+      setWaypointRows(previousFields.waypointRows);
       return current.slice(0, -1);
     });
   };
+
+  const updateWaypointRow = (
+    rowId: string,
+    update: Partial<Pick<WaypointRow, "text" | "showOnMap">>
+  ) => {
+    setWaypointRows((current) =>
+      current.map((row) => (row.id === rowId ? { ...row, ...update } : row))
+    );
+  };
+
+  const removeWaypointRow = (rowId: string) => {
+    setWaypointRows((current) => current.filter((row) => row.id !== rowId));
+  };
+
+  const moveWaypointRow = (rowId: string, direction: -1 | 1) => {
+    setWaypointRows((current) => {
+      const index = current.findIndex((row) => row.id === rowId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  };
+
+  const addWaypointRow = () => {
+    setWaypointRows((current) => [
+      ...current,
+      { id: newWaypointRowId(), text: "", showOnMap: true },
+    ]);
+  };
+
+  const buildRequest = (): CreateGoogleRouteRequest => {
+    const parsedOrigin = parseRouteWaypointInput(origin);
+    const parsedDestination = parseRouteWaypointInput(destination);
+    const parsedIntermediates = waypointRows
+      .filter((row) => row.text.trim())
+      .map((row) => {
+        const parsed = parseRouteWaypointInput(row.text);
+        return typeof parsed === "string"
+          ? parsed
+          : { ...parsed, showOnMap: row.showOnMap };
+      });
+
+    if (parsedIntermediates.length > 25) {
+      throw new Error("経由地は25件以内にしてください");
+    }
+
+    return {
+      name: name.trim() || `${origin.trim()} → ${destination.trim()}`,
+      origin: parsedOrigin,
+      destination: parsedDestination,
+      intermediates: parsedIntermediates,
+      travelMode,
+      includeElevation,
+    };
+  };
+
+  /** 保存せずにRoutes APIの経路を取得し、地図へ青線で描画する */
+  const previewRoute = async () => {
+    setPreviewing(true);
+    setError(null);
+    setPreviewWarning(null);
+
+    try {
+      // プレビューでは標高取得を省略する（Elevation API節約・高速化）
+      const request = { ...buildRequest(), includeElevation: false };
+      const result = await createGoogleRoutesRoute(request);
+      const path = result.route.points.map((point) => ({
+        lat: point.lat,
+        lng: point.lng,
+      }));
+
+      if (mapRef.current && window.google?.maps?.Polyline) {
+        previewPolylineRef.current?.setMap(null);
+        previewPolylineRef.current = new google.maps.Polyline({
+          map: mapRef.current,
+          path,
+          strokeColor: "#1a73e8",
+          strokeOpacity: 0.9,
+          strokeWeight: 5,
+        });
+        const bounds = new google.maps.LatLngBounds();
+        path.forEach((position) => bounds.extend(position));
+        mapRef.current.fitBounds(bounds);
+      }
+
+      const distanceKm =
+        (result.route.points.at(-1)?.distance ?? 0) / 1000;
+      setPreviewSummary(
+        `${result.routeType}・約${distanceKm.toFixed(1)}km — 青線が走行ルートです。おかしい区間があれば「経由地追加」で地図にピンを置くと自動で引き直します`
+      );
+      if (result.warning) setPreviewWarning(result.warning);
+    } catch (previewError) {
+      setError((previewError as Error).message);
+      setPreviewSummary(null);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (autoPreviewTick === 0) return;
+    // effect内の同期setStateを避けるため次のタスクで実行する
+    const timerId = window.setTimeout(() => void previewRoute(), 0);
+    return () => window.clearTimeout(timerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPreviewTick]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -218,23 +355,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
     setError(null);
 
     try {
-      const parsedOrigin = parseRouteWaypointInput(origin);
-      const parsedDestination = parseRouteWaypointInput(destination);
-      const parsedIntermediates = parseRouteWaypointLines(intermediates);
-
-      if (parsedIntermediates.length > 25) {
-        throw new Error("経由地は25件以内にしてください");
-      }
-
-      const request: CreateGoogleRouteRequest = {
-        name: name.trim() || `${origin.trim()} → ${destination.trim()}`,
-        origin: parsedOrigin,
-        destination: parsedDestination,
-        intermediates: parsedIntermediates,
-        travelMode,
-        includeElevation,
-      };
-
+      const request = buildRequest();
       const result = await createGoogleRoutesRoute(request);
       onCreated(saveCustomRoute(request, result));
     } catch (submitError) {
@@ -288,22 +409,81 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
           </label>
         </div>
 
-        <label>
-          経由地
-          <textarea
-            value={intermediates}
-            onChange={(event) => {
-              setIntermediates(event.target.value);
-              clearMapUndoStack();
-            }}
-            placeholder={"1行に1地点を入力\n例: 蒲生四丁目駅\n例: 蒲生四丁目駅 | 34.700380,135.546240"}
-            rows={4}
-          />
+        <div className="route-waypoint-rows">
+          <span className="route-waypoint-rows-title">
+            経由地（通過順・最大25地点）
+          </span>
+          {waypointRows.length === 0 && (
+            <small>
+              「経由地追加」を選んで地図をクリックするか、「＋
+              経由地を追加」で入力します。地名、「緯度,経度」、「表示名 |
+              緯度,経度」が使えます。
+            </small>
+          )}
+          {waypointRows.map((row, index) => (
+            <div className="route-waypoint-row" key={row.id}>
+              <span className="route-waypoint-index">{index + 1}</span>
+              <input
+                value={row.text}
+                onChange={(event) => {
+                  updateWaypointRow(row.id, { text: event.target.value });
+                  clearMapUndoStack();
+                }}
+                placeholder="例: 蒲生四丁目駅 / 34.700380,135.546240"
+              />
+              <label
+                className="route-waypoint-toggle"
+                title="オンにすると走行中のミニマップへ赤丸で表示します。オフでもルート計算には使われます"
+              >
+                <input
+                  type="checkbox"
+                  checked={row.showOnMap}
+                  onChange={(event) =>
+                    updateWaypointRow(row.id, {
+                      showOnMap: event.target.checked,
+                    })
+                  }
+                />
+                赤丸
+              </label>
+              <button
+                type="button"
+                aria-label={`経由地${index + 1}を上へ`}
+                disabled={index === 0}
+                onClick={() => moveWaypointRow(row.id, -1)}
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                aria-label={`経由地${index + 1}を下へ`}
+                disabled={index === waypointRows.length - 1}
+                onClick={() => moveWaypointRow(row.id, 1)}
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                aria-label={`経由地${index + 1}を削除`}
+                onClick={() => removeWaypointRow(row.id)}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+          <div>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={addWaypointRow}
+            >
+              ＋ 経由地を追加
+            </button>
+          </div>
           <small>
-            地名、「緯度,経度」、または「表示名 | 緯度,経度」で入力できます。入力順に通過します。
-            最大25地点です。
+            「赤丸」をオフにした経由地はルート計算には使われますが、走行中のミニマップには表示されません。
           </small>
-        </label>
+        </div>
 
         <section className="route-map-picker">
           <div className="route-map-picker-header">
@@ -348,6 +528,12 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
             <>
               <div ref={mapElementRef} className="route-map-picker-canvas" />
               {mapError && <p className="route-creator-error">{mapError}</p>}
+              {previewSummary && (
+                <p className="route-preview-info">{previewSummary}</p>
+              )}
+              {previewWarning && (
+                <p className="route-creator-error">{previewWarning}</p>
+              )}
             </>
           ) : (
             <p className="route-map-picker-empty">
@@ -364,10 +550,11 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
               value={travelMode}
               onChange={(event) =>
                 setTravelMode(
-                  event.target.value as GoogleTravelMode | "AUTO"
+                  event.target.value as CreateGoogleRouteRequest["travelMode"]
                 )
               }
             >
+              <option value="MAIN_ROAD">幹線道路優先（推奨・高速/有料道路回避）</option>
               <option value="AUTO">自転車優先・なければ無料道路優先の車</option>
               <option value="BICYCLE">自転車</option>
               <option value="DRIVE">車（無料道路優先）</option>
@@ -390,6 +577,19 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
           <button type="button" className="secondary-button" onClick={onCancel}>
             キャンセル
           </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={previewRoute}
+            disabled={previewing || submitting || !API_KEY}
+            title={
+              API_KEY
+                ? "保存せずに走行ルートを地図の青線で確認します"
+                : "プレビューにはVITE_GOOGLE_MAPS_API_KEYが必要です"
+            }
+          >
+            {previewing ? "プレビュー取得中…" : "ルートをプレビュー"}
+          </button>
           <button type="submit" disabled={submitting}>
             {submitting ? "ルート作成中…" : "作成して走行"}
           </button>
@@ -399,17 +599,13 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
   );
 }
 
-function safeParseCoordinate(value: string): LatLngInput | null {
+/** 座標または「表示名 | 座標」形式なら座標を返す。地名などは null */
+function safeParseWaypointCoordinate(value: string): LatLngInput | null {
   try {
-    return parseCoordinateText(value.trim());
+    const parsed = parseRouteWaypointInput(value);
+    if (typeof parsed === "string") return null;
+    return { latitude: parsed.latitude, longitude: parsed.longitude };
   } catch {
     return null;
   }
-}
-
-function parseIntermediateCoordinates(value: string): LatLngInput[] {
-  return value
-    .split("\n")
-    .map((line) => safeParseCoordinate(line.trim()))
-    .filter((coordinate): coordinate is LatLngInput => Boolean(coordinate));
 }

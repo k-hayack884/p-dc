@@ -85,4 +85,60 @@ describe("createGoogleRoutesRoute", () => {
       })
     );
   });
+
+  it("幹線道路優先ルート種別を受け取れる", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          encodedPolyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+          travelMode: "DRIVE",
+          routeType: "幹線道路優先ルート",
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await createGoogleRoutesRoute({
+      name: "幹線道路テスト",
+      origin: "大阪駅",
+      destination: "京都駅",
+      intermediates: [],
+      travelMode: "MAIN_ROAD",
+      includeElevation: false,
+    });
+
+    expect(result.routeType).toBe("幹線道路優先ルート");
+  });
+
+  it("ステップ単位で生成された座標列を優先してルートを生成する", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          travelMode: "DRIVE",
+          coordinates: [
+            { lat: 34, lng: 135, elevation: 0 },
+            { lat: 34.0001, lng: 135.0001, elevation: 0 },
+            { lat: 34.0002, lng: 135.0001, elevation: 0 },
+          ],
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await createGoogleRoutesRoute({
+      name: "高精度ルート",
+      origin: "大阪駅",
+      destination: "梅田駅",
+      intermediates: [],
+      travelMode: "DRIVE",
+      includeElevation: false,
+    });
+
+    expect(result.route.name).toBe("高精度ルート");
+    expect(result.route.points[0]).toMatchObject({ lat: 34, lng: 135 });
+    expect(result.route.points.at(-1)).toMatchObject({
+      lat: 34.0002,
+      lng: 135.0001,
+    });
+  });
 });

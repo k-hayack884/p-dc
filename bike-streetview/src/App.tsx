@@ -1,4 +1,11 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import "./App.css";
 import type { Route, RoutePoint, SensorAdapter } from "./types";
 import { totalDistance } from "./modules/routeLoader";
@@ -10,8 +17,15 @@ import { VirtualEsp32Sensor } from "./modules/sensorVirtualEsp32";
 import {
   loadMapsApi,
   StreetViewController,
-  STREET_VIEW_INTERVAL,
+  type StreetViewMotionMode,
 } from "./modules/streetViewController";
+import { ADDRESS_UPDATE_INTERVAL_METERS } from "./modules/streetViewPolicy";
+import {
+  loadStreetViewMonthlyUsage,
+  recordStreetViewUsage,
+  STREET_VIEW_MONTHLY_FREE_CAP,
+  type StreetViewMonthlyUsage,
+} from "./modules/streetViewUsage";
 import { loadRouteFromKmzUrl } from "./modules/kmzRouteLoader";
 import {
   loadGoogleRoutesRoute,
@@ -29,33 +43,29 @@ import {
   loadRouteProgress,
   saveRouteProgress,
 } from "./modules/routeProgress";
+import {
+  appDataExportFilename,
+  exportAppData,
+  importAppData,
+  parseAppDataExport,
+  serializeAppDataExport,
+} from "./modules/appDataTransfer";
 import { reverseGeocodeArea } from "./modules/locationAddress";
 import routeKmzUrl from "../routes/sources/osaka-kyoto-yodogawa.kmz?url";
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
 const GOAL_THRESHOLD_METERS = 1;
-const STREET_VIEW_INITIAL_SEARCH_OFFSETS_METERS = [
-  100,
-  -100,
-  200,
-  -200,
-  300,
-  -300,
-  500,
-  -500,
-  800,
-  -800,
-  1000,
-  -1000,
-  1500,
-  -1500,
-  2000,
-  -2000,
-];
 const DELETED_BUILT_IN_ROUTES_KEY = "bike-streetview:deleted-built-in-routes";
 const ROUTE_TITLES_KEY = "bike-streetview:route-titles";
 const ROUTE_DESCRIPTIONS_KEY = "bike-streetview:route-descriptions";
 const ROUTE_POINT_LABELS_KEY = "bike-streetview:route-point-labels";
+const MOTION_MODE_KEY = "bike-streetview:motion-mode";
+
+function loadMotionMode(): StreetViewMotionMode {
+  return window.localStorage.getItem(MOTION_MODE_KEY) === "hop"
+    ? "hop"
+    : "smooth";
+}
 const MINI_MAP_WIDTH = 220;
 const MINI_MAP_HEIGHT = 140;
 const MINI_MAP_PADDING = 14;
@@ -353,6 +363,7 @@ function routeWaypointsFromInputs(
 
   waypoints.forEach((waypoint) => {
     if (typeof waypoint === "string") return;
+    if (waypoint.showOnMap === false) return; // 赤丸オフの経由地は表示しない
     markers.push({
       lat: waypoint.latitude,
       lng: waypoint.longitude,
@@ -423,24 +434,8 @@ function applyPointLabelOverrides(
   };
 }
 
-function streetViewInitialSearchCandidates(route: Route, distanceM: number) {
-  const routeDistanceM = totalDistance(route);
-
-  return STREET_VIEW_INITIAL_SEARCH_OFFSETS_METERS.map(
-    (offset) => distanceM + offset
-  )
-    .filter(
-      (candidateDistance) =>
-        candidateDistance >= 0 && candidateDistance <= routeDistanceM
-    )
-    .map((candidateDistance) => ({
-      distance: candidateDistance,
-      point: getPointAtDistance(route, candidateDistance),
-    }));
-}
-
 export default function App() {
-  const svRef = useRef<HTMLDivElement>(null);
+  const [svContainer, setSvContainer] = useState<HTMLDivElement | null>(null);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [customRoutes, setCustomRoutes] =
     useState<CustomRoute[]>(loadCustomRoutes);
@@ -478,10 +473,14 @@ export default function App() {
     grade: 0,
     panoCount: 0,
   });
+  const [monthlyStreetViewUsage, setMonthlyStreetViewUsage] =
+    useState<StreetViewMonthlyUsage>(loadStreetViewMonthlyUsage);
   const [mapsReady, setMapsReady] = useState(false);
   const [mapsError, setMapsError] = useState<string | null>(null);
   const [currentArea, setCurrentArea] = useState("住所取得中…");
   const [sensorMode, setSensorMode] = useState<SensorMode>("keyboard");
+  const [motionMode, setMotionMode] =
+    useState<StreetViewMotionMode>(loadMotionMode);
   const [virtualTargetRpm, setVirtualTargetRpm] = useState(0);
   const [virtualConnected, setVirtualConnected] = useState(true);
   const [resetConfirmationOpen, setResetConfirmationOpen] = useState(false);
@@ -490,13 +489,18 @@ export default function App() {
   const [previewRouteType, setPreviewRouteType] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [dataTransferMessage, setDataTransferMessage] = useState<string | null>(
+    null
+  );
 
   const distanceRef = useRef(0);
   const controllerRef = useRef<StreetViewController | null>(null);
+  const motionModeRef = useRef<StreetViewMotionMode>(loadMotionMode());
   const sensorRef = useRef<SensorAdapter | null>(null);
   const serialRef = useRef<SerialSensor | null>(null);
   const virtualRef = useRef<VirtualEsp32Sensor | null>(null);
   const keyboardRef = useRef<KeyboardSensor | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!selectedRouteId) return;
@@ -591,9 +595,24 @@ export default function App() {
 
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
-    if (!API_KEY || !route || !selectedRouteId) return;
+    if (!API_KEY || !route || !selectedRouteId || !svContainer) return;
     let cancelled = false;
+    let becameReady = false;
     let addressRequestId = 0;
+    let lastAddressDistanceM = Number.NEGATIVE_INFINITY;
+
+    // 修正B（防御）: 一定時間 mapsReady にならない場合はエラー表示して
+    // 無言スタックを防ぐ。コントローラ生成に至れば下でクリアする。
+    const readyTimeoutId = window.setTimeout(() => {
+      if (!cancelled && !becameReady) {
+        console.warn(
+          "Street View init timed out: mapsReady did not become true within 10s"
+        );
+        setMapsError(
+          "Street Viewの初期化に失敗しました。ルートを選び直してください。"
+        );
+      }
+    }, 10000);
 
     const updateCurrentArea = async (
       position: google.maps.LatLngLiteral
@@ -612,15 +631,30 @@ export default function App() {
     };
 
     loadMapsApi(API_KEY)
-      .then(() => {
-        if (cancelled || !svRef.current) return;
+      .then(async () => {
+        if (cancelled) return;
+        if (!svContainer) {
+          // 修正B: 本来到達しないはずだが、到達した場合は無言で
+          // スタックさせず警告を残す。
+          console.warn(
+            "Street View init aborted: svContainer was not mounted"
+          );
+          return;
+        }
+        // 修正C: 即時解決パスでもレイアウト確定後にパノラマを生成し、
+        // サイズ0キャンバスによる黒画面を予防する。
+        await new Promise(requestAnimationFrame);
+        if (cancelled) return;
+
         const startDistance = distanceRef.current;
-        const startPoint = getPointAtDistance(route, startDistance);
         const controller = new StreetViewController(
-          svRef.current,
-          startPoint,
+          svContainer,
+          route,
           startDistance,
           (savedDistance, position, options) => {
+            if (options?.billed) {
+              setMonthlyStreetViewUsage(recordStreetViewUsage());
+            }
             if (options?.syncDistance) {
               const syncedPoint = getPointAtDistance(route, savedDistance);
               distanceRef.current = savedDistance;
@@ -630,18 +664,27 @@ export default function App() {
                 elevation: syncedPoint.elevation,
                 grade: syncedPoint.grade,
                 panoCount:
-                  controllerRef.current?.panoUpdateCount ??
+                  controllerRef.current?.panoStepCount ??
                   currentHud.panoCount,
               }));
             }
             saveRouteProgress(selectedRouteId, savedDistance);
-            void updateCurrentArea(position);
-          },
-          streetViewInitialSearchCandidates(route, startDistance)
+            if (
+              options?.syncDistance ||
+              savedDistance - lastAddressDistanceM >=
+                ADDRESS_UPDATE_INTERVAL_METERS
+            ) {
+              lastAddressDistanceM = savedDistance;
+              void updateCurrentArea(position);
+            }
+          }
         );
+        controller.setMotionMode(motionModeRef.current);
         controllerRef.current = controller;
         controller.ready.then((found) => {
           if (cancelled || controllerRef.current !== controller) return;
+          becameReady = true;
+          window.clearTimeout(readyTimeoutId);
           if (found) {
             setMapsReady(true);
             return;
@@ -651,13 +694,18 @@ export default function App() {
           );
         });
       })
-      .catch((e: Error) => setMapsError(e.message));
+      .catch((e: Error) => {
+        becameReady = true;
+        window.clearTimeout(readyTimeoutId);
+        setMapsError(e.message);
+      });
     return () => {
       cancelled = true;
+      window.clearTimeout(readyTimeoutId);
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [route, selectedRouteId]);
+  }, [route, selectedRouteId, svContainer]);
 
   // センサー＋走行ループ
   useEffect(() => {
@@ -679,22 +727,24 @@ export default function App() {
       const sensor = sensorRef.current ?? keyboard;
       const currentPoint = getPointAtDistance(route, distanceRef.current);
       const speed = sensor.getSpeedMps() * gradeFactor(currentPoint.grade);
+      const speedKmh = speed * 3.6;
+      const routeDistanceMeters = totalDistance(route);
       distanceRef.current = Math.min(
         distanceRef.current + speed * dt,
-        totalDistance(route)
+        routeDistanceMeters
       );
       const p: RoutePoint = getPointAtDistance(route, distanceRef.current);
 
       const ctrl = controllerRef.current;
-      ctrl?.maybeUpdate(distanceRef.current, p);
+      ctrl?.setTarget(distanceRef.current);
 
       setHud({
-        speedKmh: speed * 3.6,
+        speedKmh,
         rpm: sensor.getRpm(),
         distanceM: distanceRef.current,
         elevation: p.elevation,
         grade: p.grade,
-        panoCount: ctrl?.panoUpdateCount ?? 0,
+        panoCount: ctrl?.panoStepCount ?? 0,
       });
       rafId = requestAnimationFrame(loop);
     };
@@ -878,6 +928,14 @@ export default function App() {
   };
 
   const removeRouteFromList = (routeId: string) => {
+    const shouldDelete = window.confirm(
+      "このルートを削除しますか？\n保存済みの走行進捗も削除されます。"
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
     if (isBuiltInRouteId(routeId)) {
       const nextRouteIds = [...deletedBuiltInRouteIds, routeId];
       saveDeletedBuiltInRouteIds(nextRouteIds);
@@ -892,6 +950,65 @@ export default function App() {
   const restoreBuiltInRoutes = () => {
     saveDeletedBuiltInRouteIds([]);
     setDeletedBuiltInRouteIds([]);
+  };
+
+  const refreshLocalDataState = () => {
+    setCustomRoutes(loadCustomRoutes());
+    setDeletedBuiltInRouteIds(loadDeletedBuiltInRouteIds());
+    setRouteTitles(loadRouteTitles());
+    setRouteDescriptions(loadRouteDescriptions());
+    setRoutePointLabels(loadRoutePointLabelOverrides());
+    setMonthlyStreetViewUsage(loadStreetViewMonthlyUsage());
+    setMotionMode(loadMotionMode());
+    motionModeRef.current = loadMotionMode();
+    setRouteEditor(null);
+    setPointLabelEditor(null);
+  };
+
+  const exportLocalData = () => {
+    const exportData = exportAppData(window.localStorage);
+    const fileContent = serializeAppDataExport(exportData);
+    const blob = new Blob([fileContent], { type: "application/json" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = appDataExportFilename();
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+    setDataTransferMessage(
+      `${Object.keys(exportData.items).length}件のデータを書き出しました。`
+    );
+  };
+
+  const openImportDialog = () => {
+    importInputRef.current?.click();
+  };
+
+  const importLocalData = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    const shouldImport = window.confirm(
+      "移行データを読み込みますか？\n現在のBike Street Viewローカルデータは上書きされます。"
+    );
+    if (!shouldImport) return;
+
+    try {
+      const text = await file.text();
+      const exportData = parseAppDataExport(text);
+      const result = importAppData(window.localStorage, exportData);
+      refreshLocalDataState();
+      setDataTransferMessage(
+        `${result.importedCount}件のデータを読み込みました。`
+      );
+    } catch (error) {
+      setDataTransferMessage(
+        `読み込みに失敗しました: ${(error as Error).message}`
+      );
+    }
   };
 
   const startRouteEdit = (
@@ -964,6 +1081,15 @@ export default function App() {
     setResetConfirmationOpen(false);
   };
 
+  const toggleMotionMode = () => {
+    const next: StreetViewMotionMode =
+      motionMode === "smooth" ? "hop" : "smooth";
+    setMotionMode(next);
+    motionModeRef.current = next;
+    window.localStorage.setItem(MOTION_MODE_KEY, next);
+    controllerRef.current?.setMotionMode(next);
+  };
+
   const confirmReset = () => {
     if (!route) return;
     distanceRef.current = 0;
@@ -971,7 +1097,7 @@ export default function App() {
     keyboardRef.current?.stopPedaling();
     virtualRef.current?.setTargetRpm(0);
     setVirtualTargetRpm(0);
-    controllerRef.current?.reset(route.points[0]);
+    controllerRef.current?.reset(0);
     setResetConfirmationOpen(false);
   };
 
@@ -999,6 +1125,28 @@ export default function App() {
           >
             ＋ 新しいルートを作成
           </button>
+          <div className="data-transfer-panel">
+            <div>
+              <strong>Mac / Windows データ移行</strong>
+              <p>
+                Routes APIで保存したルート、ルート名、説明、地点ラベルをJSONで引き継げます。
+              </p>
+            </div>
+            <div className="data-transfer-actions">
+              <button onClick={exportLocalData}>移行データを書き出し</button>
+              <button className="secondary-button" onClick={openImportDialog}>
+                移行データを読み込み
+              </button>
+            </div>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="visually-hidden"
+              onChange={importLocalData}
+            />
+            {dataTransferMessage && <p>{dataTransferMessage}</p>}
+          </div>
           {deletedBuiltInRouteIds.length > 0 && (
             <button
               className="restore-route-button"
@@ -1007,6 +1155,7 @@ export default function App() {
               標準ルートを復元
             </button>
           )}
+          <StreetViewUsageSummary usage={monthlyStreetViewUsage} />
           <div className="route-options">
             {visibleRouteOptions.map((option) => (
               <RouteCard
@@ -1114,7 +1263,7 @@ export default function App() {
   return (
     <div className="app" key="route-running">
       {API_KEY ? (
-        <div key={selectedRouteId} ref={svRef} className="streetview" />
+        <div key={selectedRouteId} ref={setSvContainer} className="streetview" />
       ) : (
         <div className="placeholder">
           <h2>Street View 未接続</h2>
@@ -1146,7 +1295,7 @@ export default function App() {
           RPM {hud.rpm.toFixed(0)} ｜ {routeType}
         </div>
         <div className="hud-row hud-sub">
-          SV {hud.panoCount}回 / {STREET_VIEW_INTERVAL}m ｜{" "}
+          SV移動 {hud.panoCount}回（リンク追従・追加課金なし） ｜{" "}
           {sensorMode === "keyboard"
             ? "キーボード"
             : sensorMode === "virtual"
@@ -1207,6 +1356,17 @@ export default function App() {
       <div className="controls">
         <span>↑/↓: 速度 ｜ Space: 停止</span>
         <button
+          className="secondary-button"
+          onClick={toggleMotionMode}
+          title={
+            motionMode === "smooth"
+              ? "1枚ずつ移動アニメーションで進みます。酔いやすい場合は「まとめ移動」へ"
+              : "約35mごとにまとめて切り替えます。移動感がほしい場合は「なめらか」へ"
+          }
+        >
+          移動: {motionMode === "smooth" ? "なめらか" : "まとめ"}
+        </button>
+        <button
           className="danger-button"
           onClick={() => setResetConfirmationOpen(true)}
         >
@@ -1218,10 +1378,10 @@ export default function App() {
           </button>
         )}
         {sensorMode !== "virtual" && (
-          <button onClick={useVirtualEsp32}>仮想ESP32</button>
+          <button onClick={useVirtualEsp32}>テスト</button>
         )}
         {SerialSensor.isSupported() && sensorMode !== "serial" && (
-          <button onClick={connectSerial}>ESP32接続</button>
+          <button onClick={connectSerial}>スタート</button>
         )}
         <button className="secondary-button" onClick={returnToRouteSelection}>
           ルート変更
@@ -1426,6 +1586,52 @@ function projectRouteForMiniMap(
     waypoints: projectedWaypoints,
     labels,
   };
+}
+
+function StreetViewUsageSummary({
+  usage,
+}: {
+  usage: StreetViewMonthlyUsage;
+}) {
+  const remaining = STREET_VIEW_MONTHLY_FREE_CAP - usage.count;
+  const usageRate = Math.min(
+    100,
+    (usage.count / STREET_VIEW_MONTHLY_FREE_CAP) * 100
+  );
+  const isExceeded = remaining < 0;
+
+  return (
+    <section
+      className={`street-view-usage-summary ${isExceeded ? "is-exceeded" : ""}`}
+      aria-label="今月のStreet View無料枠使用回数"
+    >
+      <div>
+        <span className="route-option-source">今月のStreet View無料枠目安</span>
+        <strong>
+          {usage.count.toLocaleString()} /{" "}
+          {STREET_VIEW_MONTHLY_FREE_CAP.toLocaleString()} 回
+        </strong>
+        <small>
+          {isExceeded
+            ? `目安を${Math.abs(remaining).toLocaleString()}回超過中（走行は止めません）`
+            : `残り目安 ${remaining.toLocaleString()} 回`}
+        </small>
+      </div>
+      <div
+        className="street-view-usage-meter"
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={STREET_VIEW_MONTHLY_FREE_CAP}
+        aria-valuenow={Math.min(usage.count, STREET_VIEW_MONTHLY_FREE_CAP)}
+      >
+        <span style={{ width: `${usageRate}%` }} />
+      </div>
+      <p>
+        課金はルート表示時のパノラマ生成ごと（リンク追従による移動は無課金）。住所取得は
+        {ADDRESS_UPDATE_INTERVAL_METERS}mごとに間引きます。
+      </p>
+    </section>
+  );
 }
 
 type RouteCardProps = {
