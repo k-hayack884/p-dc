@@ -41,6 +41,18 @@ const result = {
   },
 };
 
+/** /api/custom-routesをファイルの代わりにメモリ上の配列で模擬する */
+function stubCustomRoutesApi(initial: unknown[] = []) {
+  let stored = initial;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+    if (init?.method === "PUT") {
+      stored = JSON.parse(init.body as string);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response(JSON.stringify(stored), { status: 200 });
+  });
+}
+
 describe("customRoutes", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -48,29 +60,72 @@ describe("customRoutes", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
   });
 
-  it("作成したルートを保存して読み込める", () => {
-    const saved = saveCustomRoute(request, result);
+  it("作成したルートを保存して読み込める", async () => {
+    stubCustomRoutesApi();
+    const saved = await saveCustomRoute(request, result);
 
     expect(saved.id).toMatch(/^custom-1000-/);
-    expect(loadCustomRoutes()).toEqual([saved]);
+    expect(await loadCustomRoutes()).toEqual([saved]);
   });
 
-  it("指定したルートだけ削除する", () => {
-    const first = saveCustomRoute(request, result);
+  it("指定したルートだけ削除する", async () => {
+    stubCustomRoutesApi();
+    const first = await saveCustomRoute(request, result);
     vi.spyOn(Date, "now").mockReturnValue(2_000);
-    const second = saveCustomRoute(
+    const second = await saveCustomRoute(
       { ...request, name: "大阪駅 → 奈良駅" },
       { ...result, route: { ...result.route, name: "大阪駅 → 奈良駅" } }
     );
 
-    deleteCustomRoute(first.id);
+    await deleteCustomRoute(first.id);
 
-    expect(loadCustomRoutes()).toEqual([second]);
+    expect(await loadCustomRoutes()).toEqual([second]);
   });
 
-  it("壊れた保存データは無視する", () => {
-    window.localStorage.setItem("bike-streetview:custom-routes", "{broken");
+  it("壊れたレスポンスは無視する", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{broken", { status: 200 })
+    );
 
-    expect(loadCustomRoutes()).toEqual([]);
+    expect(await loadCustomRoutes()).toEqual([]);
+  });
+
+  it("サーバーが空の場合、旧localStorageのルートを一度だけ移行する", async () => {
+    const legacyRoute = {
+      id: "custom-legacy-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      request,
+      route: result.route,
+      routeType: result.routeType,
+    };
+    window.localStorage.setItem(
+      "bike-streetview:custom-routes",
+      JSON.stringify([legacyRoute])
+    );
+    let stored: unknown[] = [];
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        if (init?.method === "PUT") {
+          stored = JSON.parse(init.body as string);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify(stored), { status: 200 });
+      });
+
+    const routes = await loadCustomRoutes();
+
+    expect(routes).toEqual([legacyRoute]);
+    expect(stored).toEqual([legacyRoute]);
+    expect(window.localStorage.getItem("bike-streetview:custom-routes")).toBe(
+      null
+    );
+
+    fetchMock.mockClear();
+    expect(await loadCustomRoutes()).toEqual([legacyRoute]);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ method: "PUT" })
+    );
   });
 });

@@ -1,4 +1,5 @@
 const STORAGE_PREFIX = "bike-streetview:";
+const BACKUP_STORAGE_PREFIX = "bike-streetview-backup:";
 const EXPORT_SCHEMA = "bike-streetview-local-data";
 const EXPORT_VERSION = 1;
 
@@ -12,6 +13,7 @@ export type AppDataExport = {
 export type ImportAppDataResult = {
   importedCount: number;
   skippedCount: number;
+  backupKey: string | null;
 };
 
 export function exportAppData(storage: Storage): AppDataExport {
@@ -83,11 +85,15 @@ export function importAppData(
 ): ImportAppDataResult {
   let importedCount = 0;
   let skippedCount = 0;
-  const existingKeys = Array.from({ length: storage.length }, (_, index) =>
-    storage.key(index)
-  ).filter((key): key is string => Boolean(key?.startsWith(STORAGE_PREFIX)));
+  const backupData = exportAppData(storage);
+  const backupKey =
+    Object.keys(backupData.items).length > 0
+      ? `${BACKUP_STORAGE_PREFIX}${backupData.exportedAt}`
+      : null;
 
-  existingKeys.forEach((key) => storage.removeItem(key));
+  if (backupKey) {
+    storage.setItem(backupKey, serializeAppDataExport(backupData));
+  }
 
   Object.entries(data.items).forEach(([key, value]) => {
     if (!key.startsWith(STORAGE_PREFIX)) {
@@ -99,5 +105,5 @@ export function importAppData(
     importedCount++;
   });
 
-  return { importedCount, skippedCount };
+  return { importedCount, skippedCount, backupKey };
 }

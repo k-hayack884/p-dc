@@ -33,13 +33,15 @@ describe("appDataTransfer", () => {
     const parsed = parseAppDataExport(jsonText);
     const result = importAppData(window.localStorage, parsed);
 
-    expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+    expect(result.importedCount).toBe(1);
+    expect(result.skippedCount).toBe(0);
+    expect(result.backupKey).toBeNull();
     expect(window.localStorage.getItem("bike-streetview:route-titles")).toBe(
       "{}"
     );
   });
 
-  it("読み込み時に既存のBike Street Viewデータを置き換える", () => {
+  it("読み込み時に既存のBike Street Viewデータを残してバックアップする", () => {
     const jsonText = JSON.stringify({
       schema: "bike-streetview-local-data",
       version: 1,
@@ -55,12 +57,20 @@ describe("appDataTransfer", () => {
     importAppData(window.localStorage, parseAppDataExport(jsonText));
 
     expect(window.localStorage.getItem("bike-streetview:route-titles")).toBe(
-      null
+      "{}"
     );
     expect(window.localStorage.getItem("bike-streetview:custom-routes")).toBe(
       "[]"
     );
     expect(window.localStorage.getItem("other-app:key")).toBe("keep");
+
+    const backupKey = Object.keys(window.localStorage).find((key) =>
+      key.startsWith("bike-streetview-backup:")
+    );
+    expect(backupKey).toBeDefined();
+    expect(window.localStorage.getItem(backupKey as string)).toContain(
+      "bike-streetview:route-titles"
+    );
   });
 
   it("不正な移行JSONはエラーにする", () => {

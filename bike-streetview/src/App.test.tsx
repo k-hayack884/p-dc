@@ -10,10 +10,35 @@ import {
 } from "vitest";
 import App from "./App";
 import { saveCustomRoute } from "./modules/customRoutes";
+import type { CustomRoute } from "./modules/customRoutes";
 import {
   loadRouteProgress,
   saveRouteProgress,
 } from "./modules/routeProgress";
+
+const customRoutesStore = vi.hoisted(() => ({
+  routes: [] as CustomRoute[],
+}));
+
+vi.mock("./modules/customRoutes", () => ({
+  loadCustomRoutes: vi.fn(async () => customRoutesStore.routes),
+  saveCustomRoute: vi.fn(async (request, result) => {
+    const customRoute: CustomRoute = {
+      id: `custom-${customRoutesStore.routes.length + 1}`,
+      createdAt: new Date().toISOString(),
+      request,
+      route: result.route,
+      routeType: result.routeType,
+    };
+    customRoutesStore.routes = [customRoute, ...customRoutesStore.routes];
+    return customRoute;
+  }),
+  deleteCustomRoute: vi.fn(async (routeId: string) => {
+    customRoutesStore.routes = customRoutesStore.routes.filter(
+      (route) => route.id !== routeId
+    );
+  }),
+}));
 
 function findButtonByText(container: HTMLElement, text: string) {
   return Array.from(
@@ -77,6 +102,7 @@ describe("Appのルート画面遷移", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     window.localStorage.clear();
+    customRoutesStore.routes = [];
     vi.stubGlobal("requestAnimationFrame", () => 1);
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -228,7 +254,7 @@ describe("Appのルート画面遷移", () => {
   });
 
   it("ミニマップに入力した地点名を表示する", async () => {
-    saveCustomRoute(
+    await saveCustomRoute(
       {
         name: "ラベルテスト",
         origin: {
@@ -303,6 +329,7 @@ describe("Appのルート画面遷移", () => {
     expect(container.textContent).toContain("出発地名");
     expect(container.textContent).toContain("経由地名");
     expect(container.textContent).toContain("目的地名");
+    expect(container.textContent).toContain("経由地名まであと 0.05km");
 
     await act(async () => {
       root.unmount();
@@ -310,7 +337,7 @@ describe("Appのルート画面遷移", () => {
   });
 
   it("ルート編集で地点ラベルを変更してミニマップに反映できる", async () => {
-    saveCustomRoute(
+    await saveCustomRoute(
       {
         name: "ラベル編集テスト",
         origin: {

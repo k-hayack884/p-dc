@@ -27,3 +27,10 @@ tmp/
 # APIキー
 .env.local
 .env*.local
+
+# 開発サーバーが永続化するローカルデータ
+.data/
+
+# hyperlapse検証用の生成物
+out/
+public/hyperlapse/

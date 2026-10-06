@@ -357,7 +357,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
     try {
       const request = buildRequest();
       const result = await createGoogleRoutesRoute(request);
-      onCreated(saveCustomRoute(request, result));
+      onCreated(await saveCustomRoute(request, result));
     } catch (submitError) {
       setError((submitError as Error).message);
     } finally {

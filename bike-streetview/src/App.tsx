@@ -66,9 +66,11 @@ function loadMotionMode(): StreetViewMotionMode {
     ? "hop"
     : "smooth";
 }
-const MINI_MAP_WIDTH = 220;
-const MINI_MAP_HEIGHT = 140;
-const MINI_MAP_PADDING = 14;
+const MINI_MAP_WIDTH = 330;
+const MINI_MAP_HEIGHT = 210;
+const MINI_MAP_PADDING = 21;
+const WAYPOINT_ARRIVAL_THRESHOLD_METERS = 2;
+const WAYPOINT_ARRIVAL_BANNER_MS = 5000;
 
 type Hud = {
   speedKmh: number;
@@ -98,6 +100,12 @@ type RouteMapMarker = {
   lat: number;
   lng: number;
   label?: string;
+};
+
+type RouteWaypointProgress = RouteMapMarker & {
+  id: string;
+  label: string;
+  distanceM: number;
 };
 
 type RoutePointLabelOverrides = {
@@ -374,6 +382,81 @@ function routeWaypointsFromInputs(
   return markers;
 }
 
+function routeWaypointDisplayLabel(
+  waypoint: RouteMapMarker,
+  index: number
+): string {
+  return waypoint.label?.trim() || `経由地${index + 1}`;
+}
+
+function distanceAlongRouteAtMarker(
+  route: Route,
+  marker: RouteMapMarker
+): number {
+  if (route.points.length === 0) return 0;
+  if (route.points.length === 1) return route.points[0].distance;
+
+  const centerLatitude =
+    route.points.reduce((sum, point) => sum + point.lat, 0) /
+    route.points.length;
+  const longitudeScale = Math.cos((centerLatitude * Math.PI) / 180);
+  const markerX = marker.lng * longitudeScale;
+  const markerY = marker.lat;
+
+  let nearestDistance = route.points[0].distance;
+  let nearestDistanceSq = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < route.points.length - 1; index++) {
+    const start = route.points[index];
+    const end = route.points[index + 1];
+    const startX = start.lng * longitudeScale;
+    const startY = start.lat;
+    const endX = end.lng * longitudeScale;
+    const endY = end.lat;
+    const segmentX = endX - startX;
+    const segmentY = endY - startY;
+    const segmentLengthSq = segmentX * segmentX + segmentY * segmentY;
+    const ratio =
+      segmentLengthSq > 0
+        ? Math.max(
+            0,
+            Math.min(
+              1,
+              ((markerX - startX) * segmentX + (markerY - startY) * segmentY) /
+                segmentLengthSq
+            )
+          )
+        : 0;
+    const projectedX = startX + segmentX * ratio;
+    const projectedY = startY + segmentY * ratio;
+    const distanceX = markerX - projectedX;
+    const distanceY = markerY - projectedY;
+    const distanceSq = distanceX * distanceX + distanceY * distanceY;
+
+    if (distanceSq < nearestDistanceSq) {
+      nearestDistanceSq = distanceSq;
+      nearestDistance =
+        start.distance + (end.distance - start.distance) * ratio;
+    }
+  }
+
+  return nearestDistance;
+}
+
+function buildRouteWaypointProgress(
+  route: Route,
+  waypoints: RouteMapMarker[]
+): RouteWaypointProgress[] {
+  return waypoints
+    .map((waypoint, index) => ({
+      ...waypoint,
+      id: `${index}:${waypoint.lat.toFixed(6)}:${waypoint.lng.toFixed(6)}`,
+      label: routeWaypointDisplayLabel(waypoint, index),
+      distanceM: distanceAlongRouteAtMarker(route, waypoint),
+    }))
+    .sort((a, b) => a.distanceM - b.distanceM);
+}
+
 function defaultRoutePointLabels(
   routeId: string,
   customRoutes: CustomRoute[]
@@ -437,8 +520,16 @@ function applyPointLabelOverrides(
 export default function App() {
   const [svContainer, setSvContainer] = useState<HTMLDivElement | null>(null);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
-  const [customRoutes, setCustomRoutes] =
-    useState<CustomRoute[]>(loadCustomRoutes);
+  const [customRoutes, setCustomRoutes] = useState<CustomRoute[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    loadCustomRoutes().then((routes) => {
+      if (!cancelled) setCustomRoutes(routes);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [deletedBuiltInRouteIds, setDeletedBuiltInRouteIds] = useState<
     BuiltInRouteId[]
   >(loadDeletedBuiltInRouteIds);
@@ -492,6 +583,10 @@ export default function App() {
   const [dataTransferMessage, setDataTransferMessage] = useState<string | null>(
     null
   );
+  const [waypointArrival, setWaypointArrival] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
 
   const distanceRef = useRef(0);
   const controllerRef = useRef<StreetViewController | null>(null);
@@ -501,6 +596,15 @@ export default function App() {
   const virtualRef = useRef<VirtualEsp32Sensor | null>(null);
   const keyboardRef = useRef<KeyboardSensor | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const previousWaypointDistanceRef = useRef(0);
+  const reachedWaypointIdsRef = useRef<Set<string>>(new Set());
+  const waypointArrivalTimerRef = useRef<number | null>(null);
+
+  const clearWaypointArrivalTimer = () => {
+    if (waypointArrivalTimerRef.current === null) return;
+    window.clearTimeout(waypointArrivalTimerRef.current);
+    waypointArrivalTimerRef.current = null;
+  };
 
   useEffect(() => {
     if (!selectedRouteId) return;
@@ -522,6 +626,10 @@ export default function App() {
             labeledResult.route,
             savedDistance
           );
+          const waypointProgress = buildRouteWaypointProgress(
+            labeledResult.route,
+            labeledResult.waypoints
+          );
           const displayName = routeDisplayTitle(
             selectedRouteId,
             customRoutes,
@@ -529,6 +637,18 @@ export default function App() {
             labeledResult.route.name
           );
           distanceRef.current = savedDistance;
+          previousWaypointDistanceRef.current = savedDistance;
+          reachedWaypointIdsRef.current = new Set(
+            waypointProgress
+              .filter(
+                (waypoint) =>
+                  waypoint.distanceM <=
+                  savedDistance + WAYPOINT_ARRIVAL_THRESHOLD_METERS
+              )
+              .map((waypoint) => waypoint.id)
+          );
+          clearWaypointArrivalTimer();
+          setWaypointArrival(null);
           setRoute({ ...labeledResult.route, name: displayName });
           setRouteStartLabel(labeledResult.startLabel);
           setRouteGoalLabel(labeledResult.goalLabel);
@@ -759,6 +879,71 @@ export default function App() {
     };
   }, [route, selectedRouteId]);
 
+  const routeWaypointProgress = useMemo(
+    () => (route ? buildRouteWaypointProgress(route, routeWaypoints) : []),
+    [route, routeWaypoints]
+  );
+  const nextWaypoint = useMemo(
+    () =>
+      routeWaypointProgress.find(
+        (waypoint) =>
+          waypoint.distanceM - hud.distanceM >
+          WAYPOINT_ARRIVAL_THRESHOLD_METERS
+      ),
+    [hud.distanceM, routeWaypointProgress]
+  );
+
+  useEffect(() => {
+    if (!route || routeWaypointProgress.length === 0) {
+      previousWaypointDistanceRef.current = hud.distanceM;
+      return;
+    }
+
+    const previousDistance = previousWaypointDistanceRef.current;
+    const currentDistance = hud.distanceM;
+
+    if (
+      currentDistance + WAYPOINT_ARRIVAL_THRESHOLD_METERS <
+      previousDistance
+    ) {
+      reachedWaypointIdsRef.current = new Set();
+      clearWaypointArrivalTimer();
+      setWaypointArrival(null);
+    }
+
+    const arrivedWaypoint = routeWaypointProgress.find((waypoint) => {
+      if (reachedWaypointIdsRef.current.has(waypoint.id)) return false;
+
+      return (
+        previousDistance <
+          waypoint.distanceM - WAYPOINT_ARRIVAL_THRESHOLD_METERS &&
+        currentDistance >=
+          waypoint.distanceM - WAYPOINT_ARRIVAL_THRESHOLD_METERS
+      );
+    });
+
+    if (arrivedWaypoint) {
+      reachedWaypointIdsRef.current.add(arrivedWaypoint.id);
+      clearWaypointArrivalTimer();
+      setWaypointArrival({
+        id: arrivedWaypoint.id,
+        label: arrivedWaypoint.label,
+      });
+      waypointArrivalTimerRef.current = window.setTimeout(() => {
+        setWaypointArrival(null);
+        waypointArrivalTimerRef.current = null;
+      }, WAYPOINT_ARRIVAL_BANNER_MS);
+    }
+
+    previousWaypointDistanceRef.current = currentDistance;
+  }, [hud.distanceM, route, routeWaypointProgress]);
+
+  useEffect(() => {
+    return () => {
+      clearWaypointArrivalTimer();
+    };
+  }, []);
+
   const connectSerial = async () => {
     try {
       const serial = new SerialSensor();
@@ -909,7 +1094,7 @@ export default function App() {
   };
 
   const removeCustomRoute = (routeId: string) => {
-    deleteCustomRoute(routeId);
+    void deleteCustomRoute(routeId);
     clearRouteProgress(routeId);
     const { [routeId]: _deletedTitle, ...nextTitles } = routeTitles;
     const { [routeId]: _deletedDescription, ...nextDescriptions } =
@@ -952,8 +1137,8 @@ export default function App() {
     setDeletedBuiltInRouteIds([]);
   };
 
-  const refreshLocalDataState = () => {
-    setCustomRoutes(loadCustomRoutes());
+  const refreshLocalDataState = async () => {
+    setCustomRoutes(await loadCustomRoutes());
     setDeletedBuiltInRouteIds(loadDeletedBuiltInRouteIds());
     setRouteTitles(loadRouteTitles());
     setRouteDescriptions(loadRouteDescriptions());
@@ -992,7 +1177,7 @@ export default function App() {
     if (!file) return;
 
     const shouldImport = window.confirm(
-      "移行データを読み込みますか？\n現在のBike Street Viewローカルデータは上書きされます。"
+      "移行データを読み込みますか？\n同じ項目は上書きされますが、読み込み前のデータはブラウザ内にバックアップします。"
     );
     if (!shouldImport) return;
 
@@ -1000,7 +1185,7 @@ export default function App() {
       const text = await file.text();
       const exportData = parseAppDataExport(text);
       const result = importAppData(window.localStorage, exportData);
-      refreshLocalDataState();
+      await refreshLocalDataState();
       setDataTransferMessage(
         `${result.importedCount}件のデータを読み込みました。`
       );
@@ -1067,6 +1252,10 @@ export default function App() {
     virtualRef.current = null;
     sensorRef.current = null;
     distanceRef.current = 0;
+    previousWaypointDistanceRef.current = 0;
+    reachedWaypointIdsRef.current = new Set();
+    clearWaypointArrivalTimer();
+    setWaypointArrival(null);
     setRoute(null);
     setRouteStartLabel(undefined);
     setRouteGoalLabel(undefined);
@@ -1093,6 +1282,10 @@ export default function App() {
   const confirmReset = () => {
     if (!route) return;
     distanceRef.current = 0;
+    previousWaypointDistanceRef.current = 0;
+    reachedWaypointIdsRef.current = new Set();
+    clearWaypointArrivalTimer();
+    setWaypointArrival(null);
     if (selectedRouteId) clearRouteProgress(selectedRouteId);
     keyboardRef.current?.stopPedaling();
     virtualRef.current?.setTargetRpm(0);
@@ -1285,6 +1478,15 @@ export default function App() {
           距離 {(hud.distanceM / 1000).toFixed(2)} km /{" "}
           {(routeDistanceM / 1000).toFixed(2)} km
         </div>
+        {nextWaypoint && (
+          <div className="hud-row hud-next-waypoint">
+            {nextWaypoint.label}まであと{" "}
+            {Math.max(0, (nextWaypoint.distanceM - hud.distanceM) / 1000).toFixed(
+              2
+            )}
+            km
+          </div>
+        )}
         {isGoalReached && (
           <div className="hud-row hud-goal">ゴール到着</div>
         )}
@@ -1315,6 +1517,17 @@ export default function App() {
         goalLabel={routeGoalLabel}
         waypoints={routeWaypoints}
       />
+
+      {waypointArrival && (
+        <div
+          className="waypoint-arrival-banner"
+          role="status"
+          aria-live="polite"
+        >
+          <span>WAYPOINT</span>
+          <strong>{waypointArrival.label} 到着</strong>
+        </div>
+      )}
 
       {isGoalReached && (
         <div className="goal-banner" role="status" aria-live="polite">

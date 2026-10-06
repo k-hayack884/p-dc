@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { loadEnv, type Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
@@ -775,6 +777,64 @@ function routesApiPlugin(
   };
 }
 
+const CUSTOM_ROUTES_FILE = join(process.cwd(), ".data", "custom-routes.json");
+
+function readCustomRoutesFile(): unknown[] {
+  if (!existsSync(CUSTOM_ROUTES_FILE)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(CUSTOM_ROUTES_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomRoutesFile(routes: unknown[]): void {
+  mkdirSync(dirname(CUSTOM_ROUTES_FILE), { recursive: true });
+  writeFileSync(CUSTOM_ROUTES_FILE, JSON.stringify(routes, null, 2));
+}
+
+/**
+ * ルート作成データを開発サーバーのファイルシステムに永続化するAPI。
+ * localStorageと違いオリジン（ポート）に依存しないため、5173/5175等
+ * どのポートで起動しても同じ.data/custom-routes.jsonを共有できる。
+ */
+function customRoutesApiPlugin(): Plugin {
+  return {
+    name: "local-custom-routes-api",
+    configureServer(server) {
+      server.middlewares.use(
+        "/api/custom-routes",
+        async (request: IncomingMessage, response: ServerResponse) => {
+          if (request.method === "GET") {
+            sendJson(response, 200, readCustomRoutesFile());
+            return;
+          }
+
+          if (request.method === "PUT") {
+            try {
+              const body = await readJsonBody(request);
+              if (!Array.isArray(body)) {
+                sendJson(response, 400, { error: "配列で送信してください" });
+                return;
+              }
+              writeCustomRoutesFile(body);
+              sendJson(response, 200, { ok: true });
+            } catch (error) {
+              sendJson(response, 400, {
+                error: `リクエストJSONが不正です: ${(error as Error).message}`,
+              });
+            }
+            return;
+          }
+
+          sendJson(response, 405, { error: "Method not allowed" });
+        }
+      );
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
@@ -791,6 +851,7 @@ export default defineConfig(({ mode }) => {
         elevationApiKey,
         !routesApiKey && Boolean(fallbackMapsApiKey)
       ),
+      customRoutesApiPlugin(),
     ],
     test: {
       environment: "jsdom",

@@ -909,13 +909,13 @@
 
 .mini-route-map {
   position: absolute;
-  left: 12px;
+  right: 18px;
   bottom: 122px;
   z-index: 10;
-  width: 220px;
-  padding: 8px;
+  width: 330px;
+  padding: 12px;
   border: 1px solid rgba(148, 163, 184, 0.28);
-  border-radius: 12px;
+  border-radius: 16px;
   color: #e2e8f0;
   background: rgba(2, 6, 23, 0.72);
   backdrop-filter: blur(3px);
@@ -924,8 +924,8 @@
 .mini-route-map-header {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 6px;
-  font-size: 11px;
+  margin-bottom: 8px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -978,13 +978,77 @@
 
 .mini-route-map-label {
   fill: #fff;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   paint-order: stroke;
   pointer-events: none;
   stroke: rgba(15, 23, 42, 0.92);
   stroke-linejoin: round;
   stroke-width: 3px;
+}
+
+.hud-next-waypoint {
+  color: #bfdbfe;
+}
+
+.waypoint-arrival-banner {
+  position: absolute;
+  top: 46%;
+  left: 50%;
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  min-width: min(520px, 76vw);
+  padding: 22px 30px;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(147, 197, 253, 0.62);
+  border-radius: 24px;
+  color: #fff;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(96, 165, 250, 0.45), transparent 58%),
+    rgba(15, 23, 42, 0.82);
+  box-shadow:
+    0 24px 80px rgba(15, 23, 42, 0.62),
+    0 0 42px rgba(37, 99, 235, 0.44);
+  animation: waypoint-arrival 5s ease both;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.waypoint-arrival-banner span {
+  color: #93c5fd;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.28em;
+}
+
+.waypoint-arrival-banner strong {
+  font-size: clamp(28px, 5vw, 48px);
+  line-height: 1.1;
+  text-shadow: 0 0 26px rgba(96, 165, 250, 0.58);
+}
+
+@keyframes waypoint-arrival {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -40%) scale(0.92);
+    filter: blur(8px);
+  }
+  14% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.02);
+    filter: blur(0);
+  }
+  24%,
+  78% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -58%) scale(0.96);
+  }
 }
 
 .controls {
@@ -1126,11 +1190,19 @@
   }
 
   .mini-route-map {
-    width: 170px;
+    right: 10px;
     bottom: 86px;
+    width: min(260px, calc(100vw - 20px));
+    padding: 10px;
+  }
+
+  .waypoint-arrival-banner {
+    min-width: min(360px, 84vw);
+    padding: 18px 20px;
   }
 
   .controls > span {
     display: none;
   }
 }
+
