@@ -1191,4 +1191,238 @@ describe("StreetViewController（リンク追従・ハイブリッド方式）",
     });
     expect(mocks.setPano).not.toHaveBeenCalledWith("r3");
   });
+  describe("パノラマ列（事前作り込み）での走行", () => {
+    /** 北へ10m間隔のパノラマ列と、対応するグラフ */
+    function chainFixture(count: number, searchAt: number[] = []) {
+      const graph: PanoGraph = {};
+      const chain = [];
+      for (let index = 0; index < count; index += 1) {
+        const y = index * 10;
+        graph[`c${index}`] = { x: 0, y, links: [] };
+        chain.push({
+          pano: `c${index}`,
+          ...toLatLng(0, y),
+          distanceM: y,
+          sideM: 0,
+          source: (index === 0 || searchAt.includes(index) ? "search" : "link") as
+            | "search"
+            | "link",
+          flags: [],
+        });
+      }
+      return { graph, chain };
+    }
+
+    it("開始距離に対応するエントリを表示し、近傍検索はしない", async () => {
+      const route = makeRoute([0, 0, 0, 0]);
+      const { graph, chain } = chainFixture(10);
+      const mocks = setupMockMaps(graph);
+      const onPanoramaChanged = vi.fn();
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        35,
+        onPanoramaChanged,
+        chain
+      );
+      await expect(controller.ready).resolves.toBe(true);
+
+      expect(controller.usesChain).toBe(true);
+      expect(mocks.setPano).toHaveBeenCalledWith("c3");
+      expect(mocks.locationGetPanorama).not.toHaveBeenCalled();
+      expect(onPanoramaChanged).toHaveBeenCalledWith(
+        30,
+        expect.anything(),
+        { syncDistance: true, billed: true }
+      );
+    });
+
+    it("まとめ移動では約50mぶんのエントリを連続表示する", async () => {
+      const route = makeRoute([0, 0, 0, 0]);
+      const { graph, chain } = chainFixture(10);
+      const mocks = setupMockMaps(graph);
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        0,
+        undefined,
+        chain
+      );
+      await controller.ready;
+      controller.setMotionMode("hop");
+      mocks.setPano.mockClear();
+
+      controller.setTarget(30); // 50m未満は動かない
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(mocks.setPano).not.toHaveBeenCalled();
+
+      controller.setTarget(55);
+      await vi.waitFor(
+        () => {
+          expect(mocks.setPano.mock.calls.map((call) => call[0])).toEqual([
+            "c1", "c2", "c3", "c4", "c5",
+          ]);
+        },
+        { timeout: 3000 }
+      );
+      expect(mocks.locationGetPanorama).not.toHaveBeenCalled();
+    });
+
+    it("乗り継ぎ（search）エントリの手前で区切り、そこは単独で移動する", async () => {
+      const route = makeRoute([0, 0, 0, 0]);
+      const { graph, chain } = chainFixture(10, [3]);
+      const mocks = setupMockMaps(graph);
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        0,
+        undefined,
+        chain
+      );
+      await controller.ready;
+      controller.setMotionMode("hop");
+      mocks.setPano.mockClear();
+
+      controller.setTarget(55);
+      await vi.waitFor(
+        () => {
+          expect(mocks.setPano.mock.calls.map((call) => call[0])).toEqual([
+            "c1", "c2", "c3",
+          ]);
+        },
+        { timeout: 3000 }
+      );
+      // c1-c2 を連続表示 → 乗り継ぎの c3 は単独で移動（その先は再び約50mごと）
+      expect(controller.diagnostics.map((entry) => entry.kind)).toEqual([
+        "link",
+        "resync",
+      ]);
+    });
+
+    /** 北へ10m間隔のノード（id = prefix+番号）を from〜to まで双方向リンクで作る */
+    function linkedRun(prefix: string, from: number, to: number): PanoGraph {
+      const graph: PanoGraph = {};
+      for (let i = from; i <= to; i += 1) {
+        const links = [];
+        if (i > from) links.push({ pano: `${prefix}${i - 1}`, heading: 180 });
+        if (i < to) links.push({ pano: `${prefix}${i + 1}`, heading: 0 });
+        graph[`${prefix}${i}`] = { x: 0, y: i * 10, links };
+      }
+      return graph;
+    }
+
+    function chainOf(prefix: string, from: number, to: number) {
+      const chain = [];
+      for (let i = from; i <= to; i += 1) {
+        chain.push({
+          pano: `${prefix}${i}`,
+          ...toLatLng(0, i * 10),
+          distanceM: i * 10,
+          sideM: 0,
+          source: (i === from ? "search" : "link") as "search" | "link",
+          flags: [],
+        });
+      }
+      return chain;
+    }
+
+    it("範囲の終わりまでパノラマ列を再生し、その先は探索方式（リンク追従）で進む", async () => {
+      const route = makeRoute([0, 0, 0, 0, 0, 0]); // 北へ300m
+      const graph = { ...linkedRun("c", 0, 8), ...linkedRun("l", 9, 20) };
+      graph.c8.links.push({ pano: "l9", heading: 0 });
+      graph.l9.links.push({ pano: "c8", heading: 180 });
+      const mocks = setupMockMaps(graph);
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        0,
+        undefined,
+        chainOf("c", 0, 8),
+        [{ startM: 0, endM: 80 }]
+      );
+      await controller.ready;
+      mocks.setPano.mockClear();
+
+      // 走行ループと同じく毎フレーム目標距離を伝える
+      const ticker = setInterval(() => controller.setTarget(110), 20);
+      try {
+        await vi.waitFor(
+          () => {
+            const calls = mocks.setPano.mock.calls.map((call) => call[0]);
+            expect(calls.slice(0, 8)).toEqual(["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
+            expect(calls).toContain("l9");
+          },
+          { timeout: 8000 }
+        );
+      } finally {
+        clearInterval(ticker);
+      }
+      expect(mocks.locationGetPanorama).not.toHaveBeenCalled();
+    }, 15000);
+
+    it("範囲外から始めると探索方式で走り、範囲に入ったらパノラマ列へ移る", async () => {
+      const route = makeRoute([0, 0, 0, 0, 0, 0]);
+      const graph = { ...linkedRun("l", 0, 9), ...linkedRun("c", 10, 20) };
+      const mocks = setupMockMaps(graph);
+      mocks.locationGetPanorama.mockResolvedValue({
+        data: { location: { latLng: latLngFns(0, 0), pano: "l0" }, links: [{ pano: "l1", heading: 0 }] },
+      });
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        0,
+        undefined,
+        chainOf("c", 10, 20),
+        [{ startM: 100, endM: 200 }]
+      );
+      await expect(controller.ready).resolves.toBe(true);
+      expect(mocks.locationGetPanorama).toHaveBeenCalled(); // 範囲外は従来の初期化
+
+      const ticker = setInterval(() => controller.setTarget(125), 20);
+      try {
+        await vi.waitFor(
+          () => {
+            expect(mocks.setPano).toHaveBeenCalledWith("c12");
+          },
+          { timeout: 8000 }
+        );
+      } finally {
+        clearInterval(ticker);
+      }
+    }, 10000);
+
+    it("列のパノラマが表示できなければ従来の探索方式に切り替える", async () => {
+      const route = makeRoute([0, 0]);
+      const mocks = setupMockMaps({});
+      mocks.locationGetPanorama.mockResolvedValue({
+        data: { location: { latLng: latLngFns(0, 0) } },
+      });
+      const chain = [
+        {
+          pano: "removed",
+          ...toLatLng(0, 0),
+          distanceM: 0,
+          sideM: 0,
+          source: "search" as const,
+          flags: [],
+        },
+      ];
+
+      const controller = new StreetViewController(
+        document.createElement("div"),
+        route,
+        0,
+        undefined,
+        chain
+      );
+      await expect(controller.ready).resolves.toBe(true);
+      expect(controller.usesChain).toBe(false);
+      expect(mocks.locationGetPanorama).toHaveBeenCalled();
+    }, 10000);
+  });
 });

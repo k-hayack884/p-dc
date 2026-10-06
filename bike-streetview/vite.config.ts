@@ -835,6 +835,58 @@ function customRoutesApiPlugin(): Plugin {
   };
 }
 
+/**
+ * { [routeId]: 値 } 形式のJSONを .data/ 配下のファイルに永続化するAPI。
+ * パノラマ列（pano-chains）と区間の設定（pano-chain-settings）で使う。
+ */
+function jsonObjectFileApiPlugin(apiPath: string, fileName: string): Plugin {
+  const file = join(process.cwd(), ".data", fileName);
+  return {
+    name: `local-json-object-api:${fileName}`,
+    configureServer(server) {
+      server.middlewares.use(
+        apiPath,
+        async (request: IncomingMessage, response: ServerResponse) => {
+          if (request.method === "GET") {
+            let body: unknown = {};
+            if (existsSync(file)) {
+              try {
+                body = JSON.parse(readFileSync(file, "utf8"));
+              } catch {
+                body = {};
+              }
+            }
+            sendJson(response, 200, body);
+            return;
+          }
+
+          if (request.method === "PUT") {
+            try {
+              const body = await readJsonBody(request);
+              if (!body || typeof body !== "object" || Array.isArray(body)) {
+                sendJson(response, 400, {
+                  error: "ルートIDをキーにしたオブジェクトで送信してください",
+                });
+                return;
+              }
+              mkdirSync(dirname(file), { recursive: true });
+              writeFileSync(file, JSON.stringify(body));
+              sendJson(response, 200, { ok: true });
+            } catch (error) {
+              sendJson(response, 400, {
+                error: `リクエストJSONが不正です: ${(error as Error).message}`,
+              });
+            }
+            return;
+          }
+
+          sendJson(response, 405, { error: "Method not allowed" });
+        }
+      );
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
@@ -852,6 +904,8 @@ export default defineConfig(({ mode }) => {
         !routesApiKey && Boolean(fallbackMapsApiKey)
       ),
       customRoutesApiPlugin(),
+      jsonObjectFileApiPlugin("/api/pano-chains", "pano-chains.json"),
+      jsonObjectFileApiPlugin("/api/pano-chain-settings", "pano-chain-settings.json"),
     ],
     test: {
       environment: "jsdom",

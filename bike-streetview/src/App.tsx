@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type FormEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -39,6 +40,19 @@ import {
   type CustomRoute,
 } from "./modules/customRoutes";
 import { RouteCreator } from "./RouteCreator";
+import { PanoChainEditor } from "./PanoChainEditor";
+import {
+  isChainStale,
+  summarizeChain,
+  type PanoChain,
+} from "./modules/panoChain";
+import { loadPanoChain, loadPanoChains } from "./modules/panoChainStore";
+import {
+  locatePointsOnRoute,
+  type PanoChainSettings,
+} from "./modules/panoChainSegments";
+import { loadPanoChainSettings } from "./modules/panoChainSettingsStore";
+import type { PanoChainSectionPoint } from "./PanoChainEditor";
 import {
   clearRouteProgress,
   loadRouteProgress,
@@ -330,6 +344,57 @@ function routeDisplayTitle(
   );
 }
 
+/**
+ * パノラマ列の区間設定に使う地点（出発地・経由地・目的地）とルート上の距離。
+ * 作成したルートはすべての経由地（赤丸オフも含む）、標準ルートは表示用の経由地を使う
+ */
+function panoChainSectionPoints(
+  result: RouteLoadResult,
+  customRoute: CustomRoute | undefined
+): PanoChainSectionPoint[] {
+  const route = result.route;
+  const first = route.points[0];
+  const last = route.points[route.points.length - 1];
+  const raw: Array<{ label: string; position: google.maps.LatLngLiteral | null }> =
+    customRoute
+      ? [
+          customRoute.request.origin,
+          ...customRoute.request.intermediates,
+          customRoute.request.destination,
+        ].map((waypoint) => ({
+          label: routeWaypointLabel(waypoint),
+          position:
+            typeof waypoint === "string"
+              ? null
+              : { lat: waypoint.latitude, lng: waypoint.longitude },
+        }))
+      : [
+          { label: result.startLabel ?? "出発地", position: first ?? null },
+          ...result.waypoints.map((waypoint, index) => ({
+            label: routeWaypointDisplayLabel(waypoint, index),
+            position: { lat: waypoint.lat, lng: waypoint.lng },
+          })),
+          { label: result.goalLabel ?? "目的地", position: last ?? null },
+        ];
+  const distances = locatePointsOnRoute(
+    route,
+    raw.map((point) => point.position)
+  );
+  return raw.map((point, index) => ({
+    label: point.label,
+    distanceM: distances[index],
+  }));
+}
+
+/** ルートカードに出すパノラマ列の状態 */
+function chainStatusLabel(chain: PanoChain | undefined): string | undefined {
+  if (!chain) return undefined;
+  const summary = summarizeChain(chain);
+  return summary.majorCount > 0
+    ? `作成済み・要確認${summary.majorCount}`
+    : "作成済み";
+}
+
 function loadSelectableRoute(
   routeId: string,
   customRoutes: CustomRoute[]
@@ -578,6 +643,12 @@ export default function App() {
   const [virtualConnected, setVirtualConnected] = useState(true);
   const [resetConfirmationOpen, setResetConfirmationOpen] = useState(false);
   const [previewRouteId, setPreviewRouteId] = useState<string | null>(null);
+  const [chainEditor, setChainEditor] = useState<{
+    routeId: string;
+    title: string;
+  } | null>(null);
+  const [panoChains, setPanoChains] = useState<Record<string, PanoChain>>({});
+  const [svUsesChain, setSvUsesChain] = useState(false);
   const [previewRoute, setPreviewRoute] = useState<Route | null>(null);
   const [previewRouteType, setPreviewRouteType] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -715,6 +786,38 @@ export default function App() {
     };
   }, [customRoutes, previewRouteId, routePointLabels, routeTitles]);
 
+  // ルート一覧: パノラマ列の有無・要確認件数を表示するために読み込む
+  useEffect(() => {
+    if (selectedRouteId || chainEditor) return;
+    let cancelled = false;
+    void loadPanoChains().then((chains) => {
+      if (!cancelled) setPanoChains(chains);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [chainEditor, selectedRouteId]);
+
+  const loadChainEditorRoute = useCallback(async () => {
+    if (!chainEditor) throw new Error("ルートが選択されていません");
+    const [result, allSettings] = await Promise.all([
+      loadSelectableRoute(chainEditor.routeId, customRoutes),
+      loadPanoChainSettings(),
+    ]);
+    const customRoute = findCustomRoute(chainEditor.routeId, customRoutes);
+    const points = panoChainSectionPoints(result, customRoute);
+    const segmentCount = Math.max(points.length - 1, 1);
+    // 保存済みの設定 → ルート作成時のチェック → 全区間 の順に使う
+    const settings: PanoChainSettings = allSettings[chainEditor.routeId] ?? {
+      segments:
+        customRoute?.panoSegments?.length === segmentCount
+          ? customRoute.panoSegments
+          : Array.from({ length: segmentCount }, () => true),
+      extraRanges: [],
+    };
+    return { route: result.route, points, settings };
+  }, [chainEditor, customRoutes]);
+
   // Street View 初期化（APIキーがある場合のみ）
   useEffect(() => {
     if (!API_KEY || !route || !selectedRouteId || !svContainer) return;
@@ -768,6 +871,14 @@ export default function App() {
         await new Promise(requestAnimationFrame);
         if (cancelled) return;
 
+        // 確認済みのパノラマ列があれば、走行中の探索をせずそれを再生する
+        const panoChain = await loadPanoChain(selectedRouteId);
+        if (cancelled) return;
+        const chainEntries =
+          panoChain && !isChainStale(panoChain, route)
+            ? panoChain.entries
+            : null;
+
         const startDistance = distanceRef.current;
         const controller = new StreetViewController(
           svContainer,
@@ -799,7 +910,9 @@ export default function App() {
               lastAddressDistanceM = savedDistance;
               void updateCurrentArea(position);
             }
-          }
+          },
+          chainEntries,
+          panoChain?.ranges
         );
         controller.setMotionMode(motionModeRef.current);
         controllerRef.current = controller;
@@ -814,6 +927,7 @@ export default function App() {
         controller.ready.then((found) => {
           if (cancelled || controllerRef.current !== controller) return;
           becameReady = true;
+          setSvUsesChain(controller.usesChain);
           window.clearTimeout(readyTimeoutId);
           if (found) {
             setMapsReady(true);
@@ -1033,6 +1147,10 @@ export default function App() {
     setPreviewRouteType("");
     setPreviewError(null);
     setPreviewLoading(false);
+  };
+
+  const openChainEditor = (routeId: string, title: string) => {
+    setChainEditor({ routeId, title });
   };
 
   const openPointLabelEdit = (routeId: string, title: string) => {
@@ -1379,6 +1497,8 @@ export default function App() {
                 onSelect={selectRoute}
                 onPreview={openRoutePreview}
                 onEditPoints={openPointLabelEdit}
+                chainStatus={chainStatusLabel(panoChains[option.id])}
+                onOpenChain={API_KEY ? openChainEditor : undefined}
                 onDelete={removeRouteFromList}
                 onStartEdit={startRouteEdit}
                 onChangeEdit={(editor) =>
@@ -1408,6 +1528,8 @@ export default function App() {
                 onSelect={selectRoute}
                 onPreview={openRoutePreview}
                 onEditPoints={openPointLabelEdit}
+                chainStatus={chainStatusLabel(panoChains[customRoute.id])}
+                onOpenChain={API_KEY ? openChainEditor : undefined}
                 onDelete={removeRouteFromList}
                 onStartEdit={startRouteEdit}
                 onChangeEdit={(editor) =>
@@ -1426,6 +1548,15 @@ export default function App() {
             loading={previewLoading}
             error={previewError}
             onClose={closeRoutePreview}
+          />
+        )}
+        {chainEditor && API_KEY && (
+          <PanoChainEditor
+            apiKey={API_KEY}
+            routeId={chainEditor.routeId}
+            title={chainEditor.title}
+            loadRoute={loadChainEditorRoute}
+            onClose={() => setChainEditor(null)}
           />
         )}
         {pointLabelEditor && (
@@ -1507,7 +1638,8 @@ export default function App() {
           RPM {hud.rpm.toFixed(0)} ｜ {routeType}
         </div>
         <div className="hud-row hud-sub">
-          SV移動 {hud.panoCount}回（リンク追従・追加課金なし） ｜{" "}
+          SV移動 {hud.panoCount}回（
+          {svUsesChain ? "パノラマ列再生" : "リンク追従"}・追加課金なし） ｜{" "}
           {sensorMode === "keyboard"
             ? "キーボード"
             : sensorMode === "virtual"
@@ -1872,6 +2004,9 @@ type RouteCardProps = {
   onSelect: (routeId: string) => void;
   onPreview: (routeId: string) => void;
   onEditPoints: (routeId: string, title: string) => void;
+  /** パノラマ列の状態表示（例: 「作成済み・要確認3」）。未作成ならundefined */
+  chainStatus?: string;
+  onOpenChain?: (routeId: string, title: string) => void;
   onDelete: (routeId: string) => void;
   onStartEdit: (
     routeId: string,
@@ -1898,6 +2033,8 @@ function RouteCard({
   onSelect,
   onPreview,
   onEditPoints,
+  chainStatus,
+  onOpenChain,
   onDelete,
   onStartEdit,
   onChangeEdit,
@@ -1978,6 +2115,16 @@ function RouteCard({
             >
               ルート編集
             </button>
+            {onOpenChain && (
+              <button
+                className="pano-chain-route-button"
+                aria-label={`${title}のパノラマ列を確認`}
+                title="走行時に表示するパノラマの並びを作成・確認します"
+                onClick={() => onOpenChain(routeId, title)}
+              >
+                パノラマ列{chainStatus ? `（${chainStatus}）` : ""}
+              </button>
+            )}
             <button
               className="edit-route-button"
               aria-label={`${title}を編集`}

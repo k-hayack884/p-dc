@@ -14,6 +14,11 @@ export type CustomRoute = {
   request: CreateGoogleRouteRequest;
   route: Route;
   routeType: GoogleRoutesResult["routeType"];
+  /**
+   * 地点の間ごと（出発地→経由地1, 経由地1→経由地2, …, →目的地）に
+   * パノラマ列を使うか。省略時はすべての区間で使う
+   */
+  panoSegments?: boolean[];
 };
 
 function isCustomRoute(value: unknown): value is CustomRoute {
@@ -84,7 +89,8 @@ export async function loadCustomRoutes(): Promise<CustomRoute[]> {
 
 export async function saveCustomRoute(
   request: CreateGoogleRouteRequest,
-  result: GoogleRoutesResult
+  result: GoogleRoutesResult,
+  panoSegments?: boolean[]
 ): Promise<CustomRoute> {
   const customRoute: CustomRoute = {
     id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -92,6 +98,7 @@ export async function saveCustomRoute(
     request,
     route: result.route,
     routeType: result.routeType,
+    ...(panoSegments ? { panoSegments } : {}),
   };
   const routes = [customRoute, ...(await fetchCustomRoutes())];
   await persistCustomRoutes(routes);

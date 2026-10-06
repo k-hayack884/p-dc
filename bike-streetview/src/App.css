@@ -251,6 +251,7 @@
 
 .route-card .preview-route-button,
 .route-card .point-label-route-button,
+.route-card .pano-chain-route-button,
 .route-card .edit-route-button,
 .route-card .delete-route-button {
   padding: 5px 9px;
@@ -267,6 +268,11 @@
 .route-card .point-label-route-button {
   color: #e0f2fe;
   background: rgba(14, 116, 144, 0.78);
+}
+
+.route-card .pano-chain-route-button {
+  color: #dcfce7;
+  background: rgba(21, 128, 61, 0.78);
 }
 
 .route-card .edit-route-button {
@@ -1206,3 +1212,295 @@
   }
 }
 
+/* パノラマ列の作成・確認画面 */
+.pano-chain-dialog {
+  width: min(1280px, 100%);
+}
+
+.pano-chain-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.route-preview-header .pano-chain-header-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.route-preview-header .pano-chain-header-actions .pano-chain-save {
+  background: #15803d;
+}
+
+.pano-chain-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pano-chain-progress button {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: #475569;
+  cursor: pointer;
+}
+
+.pano-chain-body {
+  display: grid;
+  gap: 12px;
+}
+
+.pano-chain-viewer {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 12px;
+  min-height: min(460px, 52vh);
+}
+
+.pano-chain-pano,
+.pano-chain-map {
+  min-height: min(460px, 52vh);
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 14px;
+  background: #0f172a;
+}
+
+.pano-chain-empty {
+  position: absolute;
+  /* パノラマ側（左60%）だけを覆い、地図のクリック（区間の地図指定）を妨げない */
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 60%;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  text-align: center;
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.7);
+  border-radius: 14px;
+}
+
+.pano-chain-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.pano-chain-nav,
+.pano-chain-fix {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pano-chain-nav button,
+.pano-chain-fix button {
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 999px;
+  color: #e2e8f0;
+  background: #334155;
+  cursor: pointer;
+}
+
+.pano-chain-fix .danger-button {
+  color: #fee2e2;
+  background: rgba(153, 27, 27, 0.85);
+}
+
+.pano-chain-fix button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pano-chain-controls input[type="range"] {
+  width: 100%;
+}
+
+.pano-chain-entry-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: baseline;
+  color: #cbd5e1;
+}
+
+.pano-chain-entry-info strong {
+  color: #f8fafc;
+}
+
+.pano-chain-flags {
+  color: #fbbf24;
+}
+
+.pano-chain-flag-list ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 140px;
+  margin: 8px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.pano-chain-flag-list button {
+  padding: 4px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  border-radius: 999px;
+  color: #fde68a;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pano-chain-flag-list button.is-major {
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #fecaca;
+}
+
+.pano-chain-flag-list button.is-current {
+  background: rgba(14, 165, 233, 0.35);
+}
+
+@media (max-width: 760px) {
+  .pano-chain-viewer {
+    grid-template-columns: 1fr;
+  }
+
+  .pano-chain-empty {
+    width: 100%;
+    bottom: 50%;
+  }
+}
+
+.pano-chain-pending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(248, 250, 252, 0.25);
+}
+
+.pano-chain-pending button {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: #e2e8f0;
+  background: #475569;
+  cursor: pointer;
+}
+
+.pano-chain-pending .pano-chain-apply {
+  color: #fff;
+  background: #2563eb;
+}
+
+.pano-chain-marked-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: #f8fafc;
+  background: #111827;
+  border: 1px solid rgba(248, 250, 252, 0.5);
+}
+
+/* パノラマ列の区間設定 */
+.pano-section-settings {
+  padding: 12px 14px;
+  border: 1px solid rgba(249, 115, 22, 0.45);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.86);
+}
+
+.pano-section-settings summary {
+  cursor: pointer;
+  color: #fed7aa;
+}
+
+.pano-section-help {
+  margin: 8px 0;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.pano-section-group {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pano-section-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pano-section-settings button {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  color: #e2e8f0;
+  background: #334155;
+  cursor: pointer;
+}
+
+.pano-section-settings button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pano-section-settings button.is-picking {
+  background: #f97316;
+  color: #fff;
+}
+
+.pano-section-segment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pano-section-segment small,
+.pano-section-settings small {
+  color: #94a3b8;
+}
+
+.pano-section-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pano-section-range-edge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pano-section-range input[type="number"] {
+  width: 84px;
+  padding: 4px 6px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  color: #fff;
+  background: #111827;
+}
+
+.pano-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.pano-section-actions button {
+  background: #c2410c;
+}

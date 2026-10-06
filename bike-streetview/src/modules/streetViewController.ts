@@ -1,6 +1,15 @@
 import type { Route } from "../types";
 import { getPointAtDistance } from "./routeSampler";
 import { totalDistance } from "./routeLoader";
+import { findChainIndexAtDistance, type PanoChainEntry } from "./panoChain";
+import type { PanoChainRange } from "./panoChainSegments";
+
+/** パノラマ列の範囲と、その範囲に含まれるエントリの添字 */
+type ChainRangeBound = {
+  range: PanoChainRange;
+  first: number;
+  last: number;
+};
 
 /**
  * リンク追従（ハイブリッド）方式の定数。
@@ -200,7 +209,7 @@ export type StreetViewDiagnosticEntry = {
  */
 export type StreetViewMotionMode = "smooth" | "hop";
 
-function normalizeHeading(heading: number): number {
+export function normalizeHeading(heading: number): number {
   return ((heading % 360) + 360) % 360;
 }
 
@@ -208,7 +217,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function headingDelta(a: number, b: number): number {
+export function headingDelta(a: number, b: number): number {
   const delta = Math.abs(normalizeHeading(a) - normalizeHeading(b));
   return Math.min(delta, 360 - delta);
 }
@@ -217,7 +226,7 @@ function headingDelta(a: number, b: number): number {
  * 公式（Google撮影）パノラマか。
  * 投稿パノラマはID形式と著作権表示の両方で判定して確実に除外する
  */
-function isOfficialPano(
+export function isOfficialPano(
   panoId: string | undefined,
   copyright: string | undefined
 ): boolean {
@@ -236,7 +245,7 @@ const ROAD_NAME_PATTERN =
  * 屋外の道路パノラマの説明文は「道路名, 市, 府」か「市, 府」になる。
  * 先頭が道路名でも行政区画名でもない（ホワイティうめだ等の施設名）なら屋内とみなす
  */
-function hasIndoorDescription(description: string | undefined): boolean {
+export function hasIndoorDescription(description: string | undefined): boolean {
   if (!description) return false;
   if (INDOOR_DESCRIPTION_PATTERN.test(description)) return true;
   const head = description.split(",")[0]?.trim() ?? "";
@@ -245,7 +254,7 @@ function hasIndoorDescription(description: string | undefined): boolean {
 }
 
 /** 撮影車の進行方向がルートの進行方向に沿っているか（不明なら沿っているとみなす） */
-function isCapturedAlong(
+export function isCapturedAlong(
   captureHeading: number | undefined,
   routeHeading: number
 ): boolean {
@@ -255,7 +264,7 @@ function isCapturedAlong(
   );
 }
 
-function locationDescription(
+export function locationDescription(
   location: google.maps.StreetViewLocation | null | undefined
 ): string | undefined {
   return (
@@ -266,7 +275,7 @@ function locationDescription(
 }
 
 /** 2点間の距離 [m]（等距円筒近似・近距離用） */
-function distanceBetweenMeters(
+export function distanceBetweenMeters(
   from: google.maps.LatLngLiteral,
   to: google.maps.LatLngLiteral
 ): number {
@@ -277,7 +286,7 @@ function distanceBetweenMeters(
 }
 
 /** 2点間の方位角 [deg]（等距円筒近似・近距離用） */
-function bearingBetween(
+export function bearingBetween(
   from: google.maps.LatLngLiteral,
   to: google.maps.LatLngLiteral
 ): number {
@@ -382,7 +391,7 @@ export function isNearTurn(
   return false;
 }
 
-function closestRoadHeading(
+export function closestRoadHeading(
   links: google.maps.StreetViewLink[] | undefined,
   routeHeading: number
 ): number {
@@ -469,6 +478,14 @@ export class StreetViewController {
   private currentSideM: number | null = null;
   /** 直近の表示ステップの左右位置（再同期候補の基準。ランプ等で離れ始めた値に引きずられない） */
   private recentSides: number[] = [];
+  /** 事前作り込みのパノラマ列（あれば走行中の探索をせず、この並びを順に再生する） */
+  private chain: PanoChainEntry[] | null = null;
+  /** 表示中のパノラマ列の添字 */
+  private chainIndex = 0;
+  /** パノラマ列の範囲（null ならルート全体がパノラマ列） */
+  private rangeBounds: ChainRangeBound[] | null = null;
+  /** 再生中の範囲（範囲外を探索方式で走っている間は null） */
+  private activeBound: ChainRangeBound | null = null;
   /** 直近の移動種別・棄却理由（?debug=1 での検証用・新しい順ではなく発生順） */
   diagnostics: StreetViewDiagnosticEntry[] = [];
   /** 表示パノラマの移動回数（追加課金なし・HUD表示用） */
@@ -482,10 +499,31 @@ export class StreetViewController {
     container: HTMLElement,
     route: Route,
     initialDistance = 0,
-    onPanoramaChanged?: PanoramaChangedCallback
+    onPanoramaChanged?: PanoramaChangedCallback,
+    chain?: PanoChainEntry[] | null,
+    chainRanges?: PanoChainRange[] | null
   ) {
     const start = getPointAtDistance(route, initialDistance);
     this.route = route;
+    this.chain = chain && chain.length > 0 ? chain : null;
+    if (this.chain && chainRanges) {
+      const entries = this.chain;
+      this.rangeBounds = chainRanges
+        .map((range) => {
+          const indexes = entries
+            .map((entry, index) => ({ entry, index }))
+            .filter(
+              ({ entry }) =>
+                entry.distanceM >= range.startM - 1 &&
+                entry.distanceM <= range.endM + 1
+            )
+            .map(({ index }) => index);
+          return indexes.length > 0
+            ? { range, first: indexes[0], last: indexes[indexes.length - 1] }
+            : null;
+        })
+        .filter((bound): bound is ChainRangeBound => bound !== null);
+    }
     this.targetDistance = initialDistance;
     this.panoDistance = initialDistance;
     this.onPanoramaChanged = onPanoramaChanged;
@@ -502,7 +540,212 @@ export class StreetViewController {
     });
     this.panoBillingCount = 1;
     this.svService = new google.maps.StreetViewService();
-    this.ready = this.initialize(initialDistance, this.generation);
+    this.ready = this.chain
+      ? this.initializeFromChain(initialDistance, this.generation)
+      : this.initialize(initialDistance, this.generation);
+  }
+
+  /** パノラマ列を使って走行しているか（一部の区間だけの場合も含む） */
+  get usesChain(): boolean {
+    return this.chain !== null;
+  }
+
+  /** いまパノラマ列を再生しているか（範囲外を探索方式で走っている間は false） */
+  private get chainPlaying(): boolean {
+    return this.chain !== null && (this.rangeBounds === null || this.activeBound !== null);
+  }
+
+  private boundAt(distanceM: number): ChainRangeBound | null {
+    return (
+      this.rangeBounds?.find(
+        (bound) => distanceM >= bound.range.startM && distanceM < bound.range.endM
+      ) ?? null
+    );
+  }
+
+  /** パノラマ列の指定距離のエントリから表示を始める */
+  private async initializeFromChain(
+    initialDistance: number,
+    generation: number
+  ): Promise<boolean> {
+    const chain = this.chain;
+    if (!chain) return false;
+    let index = findChainIndexAtDistance(chain, initialDistance);
+    if (this.rangeBounds) {
+      // 範囲外から始まる場合は探索方式で始め、範囲に入ったらパノラマ列へ移る
+      const bound = this.boundAt(initialDistance);
+      this.activeBound = bound;
+      if (!bound) return this.initialize(initialDistance, generation);
+      index = Math.min(Math.max(index, bound.first), bound.last);
+    }
+    const entry = chain[index];
+    const moved = await this.setPanoAndWait(entry.pano);
+    if (generation !== this.generation) return false;
+    if (!moved) {
+      // パノラマが削除・差し替えされた場合: 従来の探索方式で走れるようにする
+      this.chain = null;
+      return this.initialize(initialDistance, generation);
+    }
+
+    const position = { lat: entry.lat, lng: entry.lng };
+    this.chainIndex = index;
+    this.panoDistance = entry.distanceM;
+    this.cancelHeadingTween();
+    this.panorama.setPov({
+      heading: this.headingToRouteAhead(
+        position,
+        entry.distanceM,
+        VIEW_LOOKAHEAD_METERS
+      ),
+      pitch: 0,
+    });
+    this.panoStepCount += 1;
+    this.onPanoramaChanged?.(entry.distanceM, position, {
+      syncDistance: true,
+      billed: true,
+    });
+    return true;
+  }
+
+  /**
+   * パノラマ列の範囲に応じて進め方を決める。
+   * stepped: パノラマ列で進んだ / idle: 今は進まない / live: 範囲外なので探索方式で進む
+   */
+  private async advanceChain(
+    generation: number
+  ): Promise<"stepped" | "idle" | "live"> {
+    const chain = this.chain;
+    if (!chain) return "live";
+    if (!this.rangeBounds) {
+      return (await this.stepAlongChain(generation, chain.length - 1))
+        ? "stepped"
+        : "idle";
+    }
+
+    const active = this.activeBound;
+    if (active) {
+      if (this.chainIndex < active.last) {
+        return (await this.stepAlongChain(generation, active.last))
+          ? "stepped"
+          : "idle";
+      }
+      if (this.targetDistance <= active.range.endM) return "idle";
+      // 範囲の終わり: ここから先は探索方式で走る（現在のパノラマのリンクから続ける）
+      const last = chain[this.chainIndex];
+      this.activeBound = null;
+      this.currentSideM = last.sideM;
+      this.currentImageDate = last.imageDate;
+      this.recentSides = [];
+      this.rememberSide(last.sideM);
+      return "live";
+    }
+
+    const bound = this.boundAt(this.targetDistance);
+    if (!bound) return "live";
+
+    // 範囲に入った: パノラマ列へ移る
+    const index = Math.min(
+      Math.max(findChainIndexAtDistance(chain, this.targetDistance), bound.first),
+      bound.last
+    );
+    const entry = chain[index];
+    const moved = await this.setPanoAndWait(entry.pano);
+    if (generation !== this.generation) return "idle";
+    if (!moved) return "live";
+
+    const position = { lat: entry.lat, lng: entry.lng };
+    this.activeBound = bound;
+    this.chainIndex = index;
+    this.panoDistance = entry.distanceM;
+    this.panoStepCount += 1;
+    this.log({
+      kind: "resync",
+      pano: entry.pano,
+      imageDate: entry.imageDate,
+      description: entry.description,
+      distanceM: entry.distanceM,
+      sideM: entry.sideM,
+    });
+    this.tweenHeading(
+      this.headingToRouteAhead(position, entry.distanceM, VIEW_LOOKAHEAD_METERS)
+    );
+    this.onPanoramaChanged?.(entry.distanceM, position, {});
+    return "stepped";
+  }
+
+  /**
+   * パノラマ列を進める。なめらか: 1枚ずつ / まとめ: 直線は約50mぶんを
+   * 短い間隔で連続表示し、曲がり角付近は1枚ずつ。リンクの途切れ（乗り継ぎ）では一度止める。
+   */
+  private async stepAlongChain(
+    generation: number,
+    maxIndex: number
+  ): Promise<boolean> {
+    const chain = this.chain;
+    if (!chain) return false;
+    const targetIndex = Math.min(
+      findChainIndexAtDistance(chain, this.targetDistance),
+      maxIndex
+    );
+    if (targetIndex <= this.chainIndex) return false;
+
+    const current = chain[this.chainIndex];
+    const fineMode =
+      this.motionMode === "smooth" || isNearTurn(this.route, current.distanceM);
+    let stopIndex = this.chainIndex + 1;
+    if (!fineMode) {
+      // 乗り継ぎ（隣接しない）エントリの手前で区切り、そこは単独で移動する
+      while (
+        stopIndex < targetIndex &&
+        chain[stopIndex + 1].source === "link" &&
+        chain[stopIndex].source === "link" &&
+        !isNearTurn(this.route, chain[stopIndex].distanceM)
+      ) {
+        stopIndex += 1;
+      }
+    }
+
+    const destination = chain[stopIndex];
+    const from = { lat: current.lat, lng: current.lng };
+    const to = { lat: destination.lat, lng: destination.lng };
+
+    // 曲がってから進む: 視線を移動方向へ先に向け、横向きのまま進んで見えるのを防ぐ
+    const moveBearing = bearingBetween(from, to);
+    const pov = this.panorama.getPov?.();
+    if (
+      typeof pov?.heading === "number" &&
+      headingDelta(pov.heading, moveBearing) > TURN_BEFORE_MOVE_DEGREES
+    ) {
+      this.tweenHeading(moveBearing);
+      await sleep(TURN_BEFORE_MOVE_WAIT_MS);
+      if (generation !== this.generation) return false;
+    }
+
+    for (let index = this.chainIndex + 1; index <= stopIndex; index += 1) {
+      const moved = await this.setPanoAndWait(chain[index].pano);
+      if (!moved || generation !== this.generation) return false;
+      this.chainIndex = index;
+      this.panoDistance = chain[index].distanceM;
+      if (index < stopIndex) {
+        await sleep(HOP_PLAYTHROUGH_INTERVAL_MS);
+        if (generation !== this.generation) return false;
+      }
+    }
+
+    this.panoStepCount += 1;
+    this.log({
+      kind: destination.source === "search" ? "resync" : "link",
+      pano: destination.pano,
+      imageDate: destination.imageDate,
+      description: destination.description,
+      distanceM: destination.distanceM,
+      sideM: destination.sideM,
+    });
+    this.tweenHeading(
+      this.headingToRouteAhead(to, destination.distanceM, VIEW_LOOKAHEAD_METERS)
+    );
+    this.onPanoramaChanged?.(destination.distanceM, to, {});
+    return true;
   }
 
   private async initialize(
@@ -563,10 +806,25 @@ export class StreetViewController {
       while (generation === this.generation && steps < MAX_STEPS_PER_ADVANCE) {
         const trigger =
           this.motionMode === "smooth" ||
-          isNearTurn(this.route, this.panoDistance)
+          isNearTurn(this.route, this.panoDistance) ||
+          // パノラマ列の乗り継ぎ地点は50m待たずに越える（区切った直後に止まらない）
+          (this.chainPlaying &&
+            this.chain?.[this.chainIndex + 1]?.source === "search")
             ? FINE_STEP_TRIGGER_METERS
             : COARSE_STEP_TRIGGER_METERS;
         if (this.targetDistance - this.panoDistance < trigger) return;
+
+        if (this.chain) {
+          // パノラマ列の範囲内: 走行中の探索・再同期はしない
+          const mode = await this.advanceChain(generation);
+          if (generation !== this.generation) return;
+          if (mode === "stepped") {
+            steps += 1;
+            continue;
+          }
+          if (mode === "idle") return;
+          // mode === "live": 範囲外は従来の探索方式で進む
+        }
 
         const stepped = await this.hopAlongLinks(generation);
         if (generation !== this.generation) return;
@@ -1405,7 +1663,10 @@ export class StreetViewController {
     this.currentImageDate = undefined;
     this.currentSideM = null;
     this.recentSides = [];
-    this.ready = this.initialize(initialDistance, this.generation);
+    this.activeBound = null;
+    this.ready = this.chain
+      ? this.initializeFromChain(initialDistance, this.generation)
+      : this.initialize(initialDistance, this.generation);
   }
 
   destroy(): void {
