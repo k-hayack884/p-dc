@@ -17,6 +17,7 @@ import { VirtualEsp32Sensor } from "./modules/sensorVirtualEsp32";
 import {
   loadMapsApi,
   StreetViewController,
+  type StreetViewDiagnosticEntry,
   type StreetViewMotionMode,
 } from "./modules/streetViewController";
 import { ADDRESS_UPDATE_INTERVAL_METERS } from "./modules/streetViewPolicy";
@@ -62,9 +63,10 @@ const ROUTE_POINT_LABELS_KEY = "bike-streetview:route-point-labels";
 const MOTION_MODE_KEY = "bike-streetview:motion-mode";
 
 function loadMotionMode(): StreetViewMotionMode {
-  return window.localStorage.getItem(MOTION_MODE_KEY) === "hop"
-    ? "hop"
-    : "smooth";
+  // 既定は「まとめ」（直線は約50mごと・曲がり角付近のみ1枚ずつ）
+  return window.localStorage.getItem(MOTION_MODE_KEY) === "smooth"
+    ? "smooth"
+    : "hop";
 }
 const MINI_MAP_WIDTH = 330;
 const MINI_MAP_HEIGHT = 210;
@@ -801,6 +803,14 @@ export default function App() {
         );
         controller.setMotionMode(motionModeRef.current);
         controllerRef.current = controller;
+        if (new URLSearchParams(window.location.search).has("debug")) {
+          // 検証用: DevToolsで copy(bikeSvDiagnostics()) するとステップ履歴を取得できる
+          (
+            window as Window & {
+              bikeSvDiagnostics?: () => StreetViewDiagnosticEntry[];
+            }
+          ).bikeSvDiagnostics = () => controller.diagnostics;
+        }
         controller.ready.then((found) => {
           if (cancelled || controllerRef.current !== controller) return;
           becameReady = true;
@@ -1574,7 +1584,7 @@ export default function App() {
           title={
             motionMode === "smooth"
               ? "1枚ずつ移動アニメーションで進みます。酔いやすい場合は「まとめ移動」へ"
-              : "約35mごとにまとめて切り替えます。移動感がほしい場合は「なめらか」へ"
+              : "直線は約50mごと、曲がり角付近は1枚ずつ切り替えます。移動感がほしい場合は「なめらか」へ"
           }
         >
           移動: {motionMode === "smooth" ? "なめらか" : "まとめ"}

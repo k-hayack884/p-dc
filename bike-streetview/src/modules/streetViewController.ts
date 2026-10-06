@@ -11,11 +11,11 @@ import { totalDistance } from "./routeLoader";
 /** 曲がり角付近: ターゲットがこの距離以上先に進んだら次のパノラマへ進む [m] */
 export const FINE_STEP_TRIGGER_METERS = 5;
 /** 直線区間: この距離たまったらリンク鎖をまとめて移動する [m]（遷移回数の削減） */
-export const COARSE_STEP_TRIGGER_METERS = 35;
+export const COARSE_STEP_TRIGGER_METERS = 50;
 /** 1回のまとめ移動で進む最大距離 [m] */
-const COARSE_HOP_MAX_METERS = 45;
+const COARSE_HOP_MAX_METERS = 60;
 /** 1回のまとめ移動で辿る最大パノラマ数 */
-const MAX_TRAVERSE_PANOS = 10;
+const MAX_TRAVERSE_PANOS = 14;
 /** この距離先までにルート方位が大きく変わるなら「曲がり角付近」とみなす [m] */
 const TURN_SCAN_AHEAD_METERS = 25;
 /** 曲がり角とみなすルート方位変化 [deg] */
@@ -27,8 +27,8 @@ const LINK_LOOKAHEAD_MAX_METERS = 30;
 const LINK_MAX_HEADING_DELTA_DEGREES = 60;
 /**
  * リンク先パノラマがルートからこの距離以上離れていたら採用しない [m]。
- * 車道撮影のパノラマはルート線から数m以内。建物内・中庭・遊歩道の
- * パノラマは10m超ずれることが多いため、厳しめに切る
+ * 高架の降り口（ランプ）や側道へは1歩ごとの左右変化が小さいまま徐々に離れていくため、
+ * 1歩ごとの変化（MAX_LATERAL_SHIFT_METERS）だけでなく絶対値でも厳しめに切る
  */
 const STEP_OFF_ROUTE_METERS = 8;
 /** 再同期先パノラマのルートからの許容ずれ [m] */
@@ -48,8 +48,50 @@ const OFFICIAL_PANO_COPYRIGHT_PATTERN = /google/i;
  * 著作権表示が取れない場合でもIDで確実に除外する
  */
 const CONTRIBUTED_PANO_ID_PATTERN = /^(AF1Qip|CAoS|CIHM)/;
-/** 実際の移動方位（現在地→リンク先）と進行方向の許容角度差 [deg]（横ステップ防止） */
-const STEP_MAX_MOVE_BEARING_DELTA_DEGREES = 50;
+/**
+ * 実際の移動方位（現在地→リンク先）と進行方向の許容角度差 [deg]（横ステップ防止）。
+ * 直線区間は斜め移動（横向きに進んで見える）を抑えるため厳しめにする
+ */
+const STEP_MAX_MOVE_BEARING_DELTA_DEGREES = 30;
+/** 曲がり角付近の移動方位の許容角度差 [deg] */
+const TURN_STEP_MAX_MOVE_BEARING_DELTA_DEGREES = 50;
+/**
+ * 1ステップでのルート線に対する左右位置（符号付きずれ）の最大変化 [m]。
+ * 反対車線・側道・高架/高架下など、並走する別の撮影列への乗り移りを防ぐ
+ */
+const MAX_LATERAL_SHIFT_METERS = 6;
+/**
+ * 再同期で撮影時期（imageDate）が同じ候補が見つからないとき、表示が止まってから
+ * この距離だけ進むまで別の撮影時期への再同期を保留する [m]。
+ * 撮影時期の切り替わり自体は頻繁に起きる（1ルートで10種類程度）ため短めにする。
+ * 高架と高架下・橋と河川敷・道路と地下駅は平面上で重なるが撮影列が別のため、
+ * 撮影時期の一致を「同じ高さの道を走り続けている」目安にする
+ */
+const RESYNC_DATE_RELAX_DISTANCE_METERS = 50;
+/**
+ * 屋内・地下パノラマの説明文パターン。
+ * Google撮影の駅構内はOUTDOOR検索をすり抜けることがあるため、説明文でも弾く
+ * （「駅前」は地上の地名に多いので除外しない）
+ */
+const INDOOR_DESCRIPTION_PATTERN =
+  /(駅|ステーション)(?!前)|ホーム|改札|構内|コンコース|地下|station|platform|concourse|underground/i;
+/**
+ * 撮影車の進行方向（tiles.centerHeading）とルート進行方向の許容差 [deg]。
+ * 超える候補は反対車線・一方通行の逆方向で撮影された可能性が高いため後回しにする
+ */
+const CAPTURE_HEADING_MAX_DELTA_DEGREES = 90;
+/**
+ * まとめ移動で途中のパノラマを順に表示する間隔 [ms]。
+ * 隣接していないパノラマへ直接setPanoすると移動アニメーションにならず暗転するため、
+ * 途中を短い間隔で辿って移動感を保つ
+ */
+const HOP_PLAYTHROUGH_INTERVAL_MS = 250;
+/** 再同期候補の左右位置の基準に使う直近の表示ステップ数 */
+const RECENT_SIDE_SAMPLES = 5;
+/** 移動後の視線: パノラマ位置からこの距離先のルート上の点を向く [m] */
+const VIEW_LOOKAHEAD_METERS = 20;
+/** 診断ログの保持件数 */
+const DIAGNOSTICS_MAX_ENTRIES = 10000;
 /** 1ステップの最大移動距離 [m]（異常なワープ防止） */
 const STEP_MAX_LENGTH_METERS = 35;
 /**
@@ -75,13 +117,15 @@ const PANO_CHANGE_TIMEOUT_MS = 3000;
 const HEADING_TWEEN_MS = 600;
 /** 再同期失敗後、次に再同期を試すまでに必要な走行距離 [m] */
 const RESYNC_RETRY_DISTANCE_METERS = 25;
+/** 再同期時、ターゲット地点に加えて候補を探す前方オフセット [m] */
+const RESYNC_AHEAD_METERS = 20;
 /** 再同期時の近傍探索半径 [m] */
 const RESYNC_SEARCH_RADII_METERS = [25, 50];
 /** 初期表示時の近傍探索半径 [m] */
 const STREET_VIEW_INITIAL_SEARCH_RADII_METERS = [50, 150, 300];
 /** 初期表示時にルート沿いへずらして探索するオフセット [m] */
 const STREET_VIEW_INITIAL_SEARCH_OFFSETS_METERS = [
-  0, 100, -100, 200, -200, 300, -300, 500, -500, 800, -800, 1000, -1000, 1500,
+  0, 10, 20, 30, 50, 100, -100, 200, -200, 300, -300, 500, -500, 800, -800, 1000, -1000, 1500,
   -1500, 2000, -2000,
 ];
 /** ルート投影時の探索窓 [m] */
@@ -106,6 +150,47 @@ type PanoMetadata = {
   position: google.maps.LatLngLiteral;
   links: google.maps.StreetViewLink[];
   copyright?: string;
+  /** 撮影年月（"YYYY-MM"）。同じ撮影列かどうかの目安 */
+  imageDate?: string;
+  /** 場所の説明文（駅名・住所など） */
+  description?: string;
+  /** 撮影車の進行方向 [deg]（tiles.centerHeading） */
+  captureHeading?: number;
+};
+
+/** リンク候補・再同期候補を棄却した理由（診断ログ用） */
+export type StepRejectReason =
+  | "metadata"
+  | "contributed"
+  | "bearing"
+  | "length"
+  | "offRoute"
+  | "lateral"
+  | "noProgress"
+  | "indoorName"
+  | "indoor"
+  | "dateChange"
+  | "noForwardLink";
+
+/** 診断ログ1件（?debug=1 の検証用） */
+export type StreetViewDiagnosticEntry = {
+  /**
+   * link: リンク移動 / bridge: 交差点などを経由したリンク移動 /
+   * resync: 近傍検索で再同期 / reject: 再同期候補を棄却 / stop: リンク追従が途切れた
+   */
+  kind: "link" | "bridge" | "resync" | "reject" | "stop";
+  pano?: string;
+  imageDate?: string;
+  description?: string;
+  /** ルート累積距離 [m] */
+  distanceM: number;
+  /** ルート線に対する符号付きずれ [m]（右が正） */
+  sideM?: number;
+  /** 撮影時期が直前と変わったか */
+  dateChanged?: boolean;
+  reason?: StepRejectReason;
+  /** このステップで棄却したリンク候補 */
+  rejected?: Array<{ pano: string; reason: StepRejectReason }>;
 };
 
 /**
@@ -140,6 +225,46 @@ function isOfficialPano(
   return !copyright || OFFICIAL_PANO_COPYRIGHT_PATTERN.test(copyright);
 }
 
+/** 説明文の先頭要素が行政区画名（大阪市など）か */
+const ADMIN_AREA_NAME_PATTERN = /(都|道|府|県|市|区|町|村|郡)$/;
+/** 説明文の先頭要素が道路・橋の名前か（国道423号・御堂筋・曽根崎通・新淀川大橋など） */
+const ROAD_NAME_PATTERN =
+  /(号|線|通|通り|筋|道|街道|橋|𣘺|バイパス|ロード|坂|トンネル|高架|ランプ|IC|JCT)$/;
+
+/**
+ * 屋内・地下パノラマらしい説明文か。
+ * 屋外の道路パノラマの説明文は「道路名, 市, 府」か「市, 府」になる。
+ * 先頭が道路名でも行政区画名でもない（ホワイティうめだ等の施設名）なら屋内とみなす
+ */
+function hasIndoorDescription(description: string | undefined): boolean {
+  if (!description) return false;
+  if (INDOOR_DESCRIPTION_PATTERN.test(description)) return true;
+  const head = description.split(",")[0]?.trim() ?? "";
+  if (!head) return false;
+  return !ADMIN_AREA_NAME_PATTERN.test(head) && !ROAD_NAME_PATTERN.test(head);
+}
+
+/** 撮影車の進行方向がルートの進行方向に沿っているか（不明なら沿っているとみなす） */
+function isCapturedAlong(
+  captureHeading: number | undefined,
+  routeHeading: number
+): boolean {
+  return (
+    typeof captureHeading !== "number" ||
+    headingDelta(captureHeading, routeHeading) <= CAPTURE_HEADING_MAX_DELTA_DEGREES
+  );
+}
+
+function locationDescription(
+  location: google.maps.StreetViewLocation | null | undefined
+): string | undefined {
+  return (
+    [location?.description, location?.shortDescription]
+      .filter((text): text is string => Boolean(text))
+      .join(" ") || undefined
+  );
+}
+
 /** 2点間の距離 [m]（等距円筒近似・近距離用） */
 function distanceBetweenMeters(
   from: google.maps.LatLngLiteral,
@@ -167,6 +292,8 @@ type RouteProjection = {
   distanceM: number;
   /** ルート線までの垂直距離 [m] */
   offsetM: number;
+  /** ルート線に対する符号付きずれ [m]（進行方向の右が正） */
+  sideM: number;
 };
 
 /**
@@ -189,6 +316,7 @@ export function projectOntoRoute(
   let best: RouteProjection = {
     distanceM: aroundDistanceM,
     offsetM: Number.POSITIVE_INFINITY,
+    sideM: 0,
   };
 
   for (let index = 1; index < points.length; index += 1) {
@@ -211,9 +339,12 @@ export function projectOntoRoute(
     const offset = Math.hypot(projX, projY);
 
     if (offset < best.offsetM) {
+      // 区間ベクトルと（区間始点→位置）の外積: 負なら進行方向の右側
+      const cross = abX * -pa.y - abY * -pa.x;
       best = {
         distanceM: a.distance + (b.distance - a.distance) * t,
         offsetM: offset,
+        sideM: cross < 0 ? offset : -offset,
       };
     }
   }
@@ -332,6 +463,14 @@ export class StreetViewController {
   private metadataCache = new Map<string, PanoMetadata | null>();
   private outdoorVerifyCache = new Map<string, boolean>();
   private motionMode: StreetViewMotionMode = "smooth";
+  /** 表示中パノラマの撮影年月（撮影列が変わったかの判定用） */
+  private currentImageDate: string | undefined;
+  /** 表示中パノラマのルート線に対する符号付きずれ [m] */
+  private currentSideM: number | null = null;
+  /** 直近の表示ステップの左右位置（再同期候補の基準。ランプ等で離れ始めた値に引きずられない） */
+  private recentSides: number[] = [];
+  /** 直近の移動種別・棄却理由（?debug=1 での検証用・新しい順ではなく発生順） */
+  diagnostics: StreetViewDiagnosticEntry[] = [];
   /** 表示パノラマの移動回数（追加課金なし・HUD表示用） */
   panoStepCount = 0;
   /** パノラマのインスタンス化回数（Dynamic Street View課金対象） */
@@ -372,19 +511,24 @@ export class StreetViewController {
   ): Promise<boolean> {
     const routeDistance = totalDistance(this.route);
 
-    for (const offset of STREET_VIEW_INITIAL_SEARCH_OFFSETS_METERS) {
-      const candidateDistance = initialDistance + offset;
-      if (candidateDistance < 0 || candidateDistance > routeDistance) continue;
-      if (generation !== this.generation) return false;
+    // 1巡目: ルート沿いに前進できるパノラマだけを開始地点にする
+    // （高架下・駅構内など進めない場所で止まり、その後誤った再同期をするのを防ぐ）
+    // 2巡目: 見つからなければ従来どおり最寄りのパノラマで開始する
+    for (const requireForwardLink of [true, false]) {
+      for (const offset of STREET_VIEW_INITIAL_SEARCH_OFFSETS_METERS) {
+        const candidateDistance = initialDistance + offset;
+        if (candidateDistance < 0 || candidateDistance > routeDistance) continue;
+        if (generation !== this.generation) return false;
 
-      const found = await this.resyncToRoute(
-        candidateDistance,
-        STREET_VIEW_INITIAL_SEARCH_RADII_METERS,
-        generation,
-        { syncDistance: true, billed: true },
-        { strict: false }
-      );
-      if (found) return true;
+        const found = await this.resyncToRoute(
+          candidateDistance,
+          STREET_VIEW_INITIAL_SEARCH_RADII_METERS,
+          generation,
+          { syncDistance: true, billed: true },
+          { strict: false, requireForwardLink }
+        );
+        if (found) return true;
+      }
     }
 
     return false;
@@ -450,157 +594,426 @@ export class StreetViewController {
     }
   }
 
+  private rememberSide(sideM: number | null): void {
+    if (sideM === null) return;
+    this.recentSides.push(sideM);
+    if (this.recentSides.length > RECENT_SIDE_SAMPLES) this.recentSides.shift();
+  }
+
+  /** 再同期候補の左右位置の基準: 直近ステップの中央値（なければ現在値） */
+  private referenceSide(): number | null {
+    if (this.recentSides.length === 0) return this.currentSideM;
+    const sorted = [...this.recentSides].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /** 診断ログへ追記する（上限を超えたら古いものから捨てる） */
+  private log(entry: StreetViewDiagnosticEntry): void {
+    this.diagnostics.push(entry);
+    if (this.diagnostics.length > DIAGNOSTICS_MAX_ENTRIES) {
+      this.diagnostics.splice(0, this.diagnostics.length - DIAGNOSTICS_MAX_ENTRIES);
+    }
+  }
+
+  /**
+   * リンク先パノラマを表示前に検証する（すべてメタデータ・無課金）。
+   * allowStall=true のときは前進しない（交差点中央など）候補も許可する。
+   */
+  private async evaluateLink(
+    link: { pano: string; heading: number },
+    from: {
+      position: google.maps.LatLngLiteral;
+      distanceM: number;
+      sideM: number | null;
+    },
+    desiredHeading: number,
+    fineMode: boolean,
+    allowStall: boolean
+  ): Promise<
+    | { ok: true; metadata: PanoMetadata; projection: RouteProjection }
+    | { ok: false; reason: StepRejectReason }
+  > {
+    const metadata = await this.getPanoMetadata(link.pano);
+    if (!metadata) return { ok: false, reason: "metadata" };
+
+    // 1. 公式パノラマ（投稿画像は建物内・遊歩道が多い）
+    if (!isOfficialPano(link.pano, metadata.copyright)) {
+      return { ok: false, reason: "contributed" };
+    }
+    // 2. 実際の移動方位が進行方向に沿っている（横ステップ・斜め移動防止）
+    const moveBearing = bearingBetween(from.position, metadata.position);
+    const maxBearingDelta = fineMode
+      ? TURN_STEP_MAX_MOVE_BEARING_DELTA_DEGREES
+      : STEP_MAX_MOVE_BEARING_DELTA_DEGREES;
+    if (!allowStall && headingDelta(moveBearing, desiredHeading) > maxBearingDelta) {
+      return { ok: false, reason: "bearing" };
+    }
+    // 3. 移動距離が異常でない（曲がり角付近は交差点パノラマを飛ばさない）
+    const maxStepLength = fineMode
+      ? TURN_STEP_MAX_LENGTH_METERS
+      : STEP_MAX_LENGTH_METERS;
+    if (distanceBetweenMeters(from.position, metadata.position) > maxStepLength) {
+      return { ok: false, reason: "length" };
+    }
+    // 4. ルート線から離れない
+    const projection = projectOntoRoute(
+      this.route,
+      metadata.position,
+      from.distanceM
+    );
+    if (projection.offsetM > STEP_OFF_ROUTE_METERS) {
+      return { ok: false, reason: "offRoute" };
+    }
+    // 5. 並走する別の撮影列（反対車線・高架/高架下）へ横に乗り移らない。
+    //    曲がり角ではルート線の基準が切り替わるため判定しない
+    if (
+      !fineMode &&
+      from.sideM !== null &&
+      Math.abs(projection.sideM - from.sideM) > MAX_LATERAL_SHIFT_METERS
+    ) {
+      return { ok: false, reason: "lateral" };
+    }
+    // 6. 後退や停滞をしない
+    const minProgress = allowStall
+      ? -MIN_FORWARD_PROGRESS_METERS
+      : MIN_FORWARD_PROGRESS_METERS;
+    if (projection.distanceM < from.distanceM + minProgress) {
+      return { ok: false, reason: "noProgress" };
+    }
+    // 7. 屋内・地下でない（説明文 → OUTDOOR検索の順に確認）
+    if (hasIndoorDescription(metadata.description)) {
+      return { ok: false, reason: "indoorName" };
+    }
+    const outdoor = await this.isOutdoorPano(link.pano, metadata.position);
+    if (!outdoor) return { ok: false, reason: "indoor" };
+
+    return { ok: true, metadata, projection };
+  }
+
+  /** リンクを進行方向に近い順に並べ、許容角度内の上位候補を返す */
+  private rankLinks(
+    links: google.maps.StreetViewLink[],
+    desiredHeading: number,
+    maxDelta = LINK_MAX_HEADING_DELTA_DEGREES
+  ): Array<{ pano: string; heading: number }> {
+    return links
+      .filter(
+        (link): link is google.maps.StreetViewLink & {
+          pano: string;
+          heading: number;
+        } => Boolean(link?.pano) && typeof link?.heading === "number"
+      )
+      .map((link) => ({
+        pano: link.pano,
+        heading: link.heading,
+        delta: headingDelta(link.heading, desiredHeading),
+      }))
+      .filter((link) => link.delta <= maxDelta)
+      .sort((a, b) => a.delta - b.delta)
+      .slice(0, MAX_LINK_CANDIDATES_PER_STEP);
+  }
+
+  /** ルート上の (distanceM + lookahead) 地点への方位 */
+  private headingToRouteAhead(
+    position: google.maps.LatLngLiteral,
+    distanceM: number,
+    lookaheadM: number
+  ): number {
+    const ahead = getPointAtDistance(
+      this.route,
+      Math.min(distanceM + lookaheadM, totalDistance(this.route))
+    );
+    if (distanceBetweenMeters(position, ahead) < 1) {
+      return normalizeHeading(ahead.heading);
+    }
+    return bearingBetween(position, { lat: ahead.lat, lng: ahead.lng });
+  }
+
   /**
    * パノラマリンクをメタデータで事前検証しながら辿り、まとめて1回表示を更新する。
    * 曲がり角付近では1枚だけ進む。表示前に検証するため、後退や
-   * ルート外（公園・私道など）への迷い込みは画面に出ない。
+   * ルート外（公園・私道など）・別の撮影列（高架/高架下・地下）への迷い込みは画面に出ない。
+   * 撮影時期が同じ候補を優先し、前進できるリンクがなければ
+   * 交差点中央など前進しないパノラマを1枚だけ経由して先へ進めるか試す。
    */
   private async hopAlongLinks(generation: number): Promise<boolean> {
     const position = this.panorama.getPosition?.();
-    let links = this.panorama.getLinks?.() ?? [];
+    let links: google.maps.StreetViewLink[] = (
+      this.panorama.getLinks?.() ?? []
+    ).filter((link): link is google.maps.StreetViewLink => link !== null);
     if (!position || links.length === 0) return false;
 
     const startDistance = this.panoDistance;
-    let currentPosition: google.maps.LatLngLiteral = {
+    const startPosition: google.maps.LatLngLiteral = {
       lat: position.lat(),
       lng: position.lng(),
     };
-    let currentDistance = startDistance;
-    let candidate: { pano: string; heading: number } | null = null;
+    let current = {
+      position: startPosition,
+      distanceM: startDistance,
+      sideM: this.currentSideM,
+      imageDate: this.currentImageDate,
+    };
+    let candidate: {
+      pano: string;
+      metadata: PanoMetadata;
+      kind: "link" | "bridge";
+      rejected: Array<{ pano: string; reason: StepRejectReason }>;
+    } | null = null;
     const fineMode =
       this.motionMode === "smooth" || isNearTurn(this.route, startDistance);
+    let firstRejected: Array<{ pano: string; reason: StepRejectReason }> = [];
+    /** まとめ移動で辿ったパノラマ（最後が表示先） */
+    const path: string[] = [];
 
     for (let index = 0; index < MAX_TRAVERSE_PANOS; index += 1) {
       if (generation !== this.generation) return false;
 
-      const gap = this.targetDistance - currentDistance;
+      const gap = this.targetDistance - current.distanceM;
       if (gap <= 0) break;
       const lookahead = Math.min(
         Math.max(gap, LINK_LOOKAHEAD_MIN_METERS),
         LINK_LOOKAHEAD_MAX_METERS
       );
-      const aheadPoint = getPointAtDistance(
-        this.route,
-        currentDistance + lookahead
+      const desiredHeading = this.headingToRouteAhead(
+        current.position,
+        current.distanceM,
+        lookahead
       );
-      const desiredHeading = bearingBetween(currentPosition, {
-        lat: aheadPoint.lat,
-        lng: aheadPoint.lng,
-      });
 
-      // 進行方向に近い順のリンク候補（許容角度内のみ）
-      const linkCandidates = links
-        .filter(
-          (link): link is google.maps.StreetViewLink & {
-            pano: string;
-            heading: number;
-          } => Boolean(link?.pano) && typeof link?.heading === "number"
-        )
-        .map((link) => ({
-          pano: link.pano,
-          heading: link.heading,
-          delta: headingDelta(link.heading, desiredHeading),
-        }))
-        .filter((link) => link.delta <= LINK_MAX_HEADING_DELTA_DEGREES)
-        .sort((a, b) => a.delta - b.delta)
-        .slice(0, MAX_LINK_CANDIDATES_PER_STEP);
-
-      let accepted: {
+      const rejected: Array<{ pano: string; reason: StepRejectReason }> = [];
+      const accepted: Array<{
         pano: string;
-        heading: number;
         metadata: PanoMetadata;
         projection: RouteProjection;
-      } | null = null;
-
-      for (const link of linkCandidates) {
-        const metadata = await this.getPanoMetadata(link.pano);
-        if (generation !== this.generation) return false;
-        if (!metadata) continue;
-
-        // 表示前検証（すべて満たしたリンクだけ採用する）:
-        // 1. 公式パノラマ（投稿画像は建物内・遊歩道が多い）
-        if (!isOfficialPano(link.pano, metadata.copyright)) continue;
-        // 2. 実際の移動方位が進行方向に沿っている（横ステップ防止）
-        const moveBearing = bearingBetween(currentPosition, metadata.position);
-        if (
-          headingDelta(moveBearing, desiredHeading) >
-          STEP_MAX_MOVE_BEARING_DELTA_DEGREES
-        ) {
-          continue;
-        }
-        // 3. 移動距離が異常でない（曲がり角付近は交差点パノラマを飛ばさない）
-        const maxStepLength = fineMode
-          ? TURN_STEP_MAX_LENGTH_METERS
-          : STEP_MAX_LENGTH_METERS;
-        if (
-          distanceBetweenMeters(currentPosition, metadata.position) >
-          maxStepLength
-        ) {
-          continue;
-        }
-        // 4. ルート線から離れない・後退や停滞をしない
-        const projection = projectOntoRoute(
-          this.route,
-          metadata.position,
-          currentDistance
+      }> = [];
+      for (const link of this.rankLinks(links, desiredHeading)) {
+        const result = await this.evaluateLink(
+          link,
+          current,
+          desiredHeading,
+          fineMode,
+          false
         );
-        if (projection.offsetM > STEP_OFF_ROUTE_METERS) continue;
-        if (
-          projection.distanceM <
-          currentDistance + MIN_FORWARD_PROGRESS_METERS
-        ) {
-          continue;
-        }
-        // 5. 屋外パノラマである（地下街・駅構内への潜り込み防止）
-        const outdoor = await this.isOutdoorPano(link.pano, metadata.position);
         if (generation !== this.generation) return false;
-        if (!outdoor) continue;
-
-        accepted = {
-          pano: link.pano,
-          heading: link.heading,
-          metadata,
-          projection,
-        };
-        break;
+        if (result.ok) {
+          accepted.push({ pano: link.pano, ...result });
+        } else {
+          rejected.push({ pano: link.pano, reason: result.reason });
+        }
       }
 
-      if (!accepted) break;
+      // 同じ撮影列（撮影時期が同じ）の候補を優先する
+      // 撮影車が同じ向きに走っていた候補（逆走防止）→ 同じ撮影列（撮影時期が同じ）の順に優先する
+      const rank = (entry: (typeof accepted)[number]) =>
+        (isCapturedAlong(entry.metadata.captureHeading, desiredHeading) ? 2 : 0) +
+        (current.imageDate !== undefined &&
+        entry.metadata.imageDate === current.imageDate
+          ? 1
+          : 0);
+      let chosen = [...accepted].sort((a, b) => rank(b) - rank(a))[0];
+      let kind: "link" | "bridge" = "link";
 
-      candidate = { pano: accepted.pano, heading: accepted.heading };
-      currentPosition = accepted.metadata.position;
-      currentDistance = accepted.projection.distanceM;
-      links = accepted.metadata.links;
+      if (!chosen && index === 0) {
+        const bridge = await this.findBridgeStep(
+          links,
+          current,
+          desiredHeading,
+          fineMode,
+          generation
+        );
+        if (generation !== this.generation) return false;
+        if (bridge) {
+          chosen = bridge;
+          kind = "bridge";
+        }
+      }
 
-      if (fineMode) break; // 曲がり角付近: 1枚ずつ表示する
-      if (currentDistance >= this.targetDistance) break;
-      if (currentDistance - startDistance >= COARSE_HOP_MAX_METERS) break;
-      if (isNearTurn(this.route, currentDistance)) break; // 曲がり角に差し掛かったら一旦表示
+      if (index === 0) firstRejected = rejected;
+      if (!chosen) break;
+
+      candidate = { pano: chosen.pano, metadata: chosen.metadata, kind, rejected };
+      path.push(chosen.pano);
+      current = {
+        position: chosen.metadata.position,
+        distanceM: Math.max(chosen.projection.distanceM, current.distanceM),
+        sideM: chosen.projection.sideM,
+        imageDate: chosen.metadata.imageDate ?? current.imageDate,
+      };
+      links = chosen.metadata.links;
+
+      if (fineMode || kind === "bridge") break; // 1枚ずつ表示する
+      if (current.distanceM >= this.targetDistance) break;
+      if (current.distanceM - startDistance >= COARSE_HOP_MAX_METERS) break;
+      if (isNearTurn(this.route, current.distanceM)) break; // 曲がり角に差し掛かったら一旦表示
     }
 
-    if (!candidate) return false;
+    if (!candidate) {
+      this.log({
+        kind: "stop",
+        distanceM: startDistance,
+        sideM: this.currentSideM ?? undefined,
+        imageDate: this.currentImageDate,
+        rejected: firstRejected.length > 0 ? firstRejected : undefined,
+      });
+      return false;
+    }
 
-    // 曲がってから進む: 視線が進行方向から大きくずれている場合は
-    // 先に旋回してから移動し、横滑りに見える遷移を防ぐ
+    // 曲がってから進む: 視線を実際の移動方向へ先に向けてから移動し、
+    // 横向きのまま進んで見える遷移を防ぐ
+    const moveBearing = bearingBetween(startPosition, current.position);
     const pov = this.panorama.getPov?.();
     const povDelta =
       typeof pov?.heading === "number"
-        ? headingDelta(pov.heading, candidate.heading)
+        ? headingDelta(pov.heading, moveBearing)
         : 0;
     if (povDelta > TURN_BEFORE_MOVE_DEGREES) {
-      this.tweenHeading(candidate.heading);
+      this.tweenHeading(moveBearing);
       await sleep(TURN_BEFORE_MOVE_WAIT_MS);
       if (generation !== this.generation) return false;
     }
 
+    // まとめ移動: 途中のパノラマを短い間隔で順に表示し、暗転ではなく移動アニメーションで進む
+    for (const pano of path.slice(0, -1)) {
+      const passed = await this.setPanoAndWait(pano);
+      if (!passed || generation !== this.generation) return false;
+      await sleep(HOP_PLAYTHROUGH_INTERVAL_MS);
+      if (generation !== this.generation) return false;
+    }
     const moved = await this.setPanoAndWait(candidate.pano);
     if (!moved || generation !== this.generation) return false;
 
-    this.panoDistance = currentDistance;
+    const dateChanged =
+      this.currentImageDate !== undefined &&
+      current.imageDate !== undefined &&
+      current.imageDate !== this.currentImageDate;
+    this.panoDistance = current.distanceM;
+    this.currentSideM = current.sideM;
+    this.rememberSide(current.sideM);
+    this.currentImageDate = current.imageDate;
     this.panoStepCount += 1;
-    this.tweenHeading(candidate.heading);
-    this.onPanoramaChanged?.(this.panoDistance, currentPosition, {});
+    this.log({
+      kind: candidate.kind,
+      pano: candidate.pano,
+      imageDate: candidate.metadata.imageDate,
+      description: candidate.metadata.description,
+      distanceM: this.panoDistance,
+      sideM: current.sideM ?? undefined,
+      dateChanged,
+      rejected: candidate.rejected.length > 0 ? candidate.rejected : undefined,
+    });
+    // 移動後は少し先のルート上の点を向く（リンク方向に合わせると斜めを向きやすい）
+    this.tweenHeading(
+      this.headingToRouteAhead(
+        current.position,
+        current.distanceM,
+        VIEW_LOOKAHEAD_METERS
+      )
+    );
+    this.onPanoramaChanged?.(this.panoDistance, current.position, {});
     return true;
+  }
+
+  /** そのパノラマからルート沿いに前進できる検証済みリンクがあるか */
+  private async hasForwardLink(
+    links: Array<google.maps.StreetViewLink | null>,
+    position: google.maps.LatLngLiteral,
+    projection: RouteProjection,
+    generation: number
+  ): Promise<boolean> {
+    const from = {
+      position,
+      distanceM: projection.distanceM,
+      sideM: projection.sideM,
+    };
+    const desiredHeading = this.headingToRouteAhead(
+      position,
+      projection.distanceM,
+      LINK_LOOKAHEAD_MIN_METERS
+    );
+    const validLinks = links.filter(
+      (link): link is google.maps.StreetViewLink => link !== null
+    );
+    for (const link of this.rankLinks(validLinks, desiredHeading)) {
+      const result = await this.evaluateLink(
+        link,
+        from,
+        desiredHeading,
+        true,
+        false
+      );
+      if (generation !== this.generation) return false;
+      if (result.ok) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 前進できるリンクがないとき、前進しないパノラマ（交差点中央など）を
+   * 1枚経由すれば先へ進めるかを確かめる。進めるなら経由パノラマを返す。
+   */
+  private async findBridgeStep(
+    links: google.maps.StreetViewLink[],
+    from: {
+      position: google.maps.LatLngLiteral;
+      distanceM: number;
+      sideM: number | null;
+      imageDate: string | undefined;
+    },
+    desiredHeading: number,
+    fineMode: boolean,
+    generation: number
+  ): Promise<{
+    pano: string;
+    metadata: PanoMetadata;
+    projection: RouteProjection;
+  } | null> {
+    // 交差点中央は進行方向から大きく外れることがあるため90°まで見る
+    for (const link of this.rankLinks(links, desiredHeading, 90)) {
+      const bridge = await this.evaluateLink(
+        link,
+        from,
+        desiredHeading,
+        fineMode,
+        true
+      );
+      if (generation !== this.generation) return null;
+      if (!bridge.ok) continue;
+      // 撮影列が変わる経由は高さの乗り換えになりやすいので使わない
+      if (
+        from.imageDate !== undefined &&
+        bridge.metadata.imageDate !== undefined &&
+        bridge.metadata.imageDate !== from.imageDate
+      ) {
+        continue;
+      }
+
+      const next = {
+        position: bridge.metadata.position,
+        distanceM: Math.max(bridge.projection.distanceM, from.distanceM),
+        sideM: bridge.projection.sideM,
+      };
+      const nextHeading = this.headingToRouteAhead(
+        next.position,
+        next.distanceM,
+        LINK_LOOKAHEAD_MIN_METERS
+      );
+      for (const onward of this.rankLinks(bridge.metadata.links, nextHeading)) {
+        if (onward.pano === link.pano) continue;
+        const result = await this.evaluateLink(
+          onward,
+          { ...next, distanceM: from.distanceM },
+          nextHeading,
+          fineMode,
+          false
+        );
+        if (generation !== this.generation) return null;
+        if (result.ok) {
+          return { pano: link.pano, ...bridge };
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -646,6 +1059,9 @@ export class StreetViewController {
           position: { lat: latLng.lat(), lng: latLng.lng() },
           links: data.links ?? [],
           copyright: data.copyright,
+          imageDate: data.imageDate,
+          description: locationDescription(data.location),
+          captureHeading: data.tiles?.centerHeading,
         };
       }
     } catch {
@@ -680,68 +1096,268 @@ export class StreetViewController {
   /**
    * ルート上の指定距離付近のパノラマをStreetViewServiceで探し、
    * setPositionで再同期する（インスタンス再生成なし＝無課金）。
-   * strict時はルート外・後退となる再同期を棄却する（初期表示・リセット時は緩和）。
+   * strict（走行中）は複数地点・半径の候補から同じ撮影列らしいものを選ぶ。
+   * 非strict（初期表示・リセット時）は最寄りのパノラマを使う。
    */
   private async resyncToRoute(
     distanceM: number,
     radiiMeters: number[],
     generation: number,
     options: PanoramaChangedOptions,
-    { strict }: { strict: boolean }
+    {
+      strict,
+      requireForwardLink = false,
+    }: { strict: boolean; requireForwardLink?: boolean }
   ): Promise<boolean> {
-    const point = getPointAtDistance(this.route, distanceM);
+    if (strict) {
+      return this.resyncAlongRoute(distanceM, radiiMeters, generation, options);
+    }
 
+    const point = getPointAtDistance(this.route, distanceM);
     for (const radius of radiiMeters) {
       if (generation !== this.generation) return false;
-      try {
-        const { data } = await this.svService.getPanorama({
-          location: { lat: point.lat, lng: point.lng },
-          radius,
-          source: google.maps.StreetViewSource.OUTDOOR,
+      const data = await this.searchPanorama(point, radius);
+      if (generation !== this.generation) return false;
+      const latLng = data?.location?.latLng;
+      if (!data || !latLng) continue;
+
+      const found = { lat: latLng.lat(), lng: latLng.lng() };
+      const projection = projectOntoRoute(this.route, found, distanceM);
+      if (requireForwardLink) {
+        const viable = await this.hasForwardLink(
+          data.links ?? [],
+          found,
+          projection,
+          generation
+        );
+        if (generation !== this.generation) return false;
+        if (!viable) continue;
+      }
+
+      this.applyResync(data, found, projection, distanceM, point.heading, options);
+      return true;
+    }
+    return false;
+  }
+
+  /** 位置指定でOUTDOORパノラマを探す（見つからなければnull） */
+  private async searchPanorama(
+    location: google.maps.LatLngLiteral,
+    radius: number
+  ): Promise<google.maps.StreetViewPanoramaData | null> {
+    try {
+      const { data } = await this.svService.getPanorama({
+        location: { lat: location.lat, lng: location.lng },
+        radius,
+        source: google.maps.StreetViewSource.OUTDOOR,
+      });
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 走行中の再同期。ターゲット地点と少し先の地点を複数の半径で探し、
+   * 「撮影時期が同じ → 左右位置が近い → ルートに近い」の順で候補を選ぶ。
+   * 高架/高架下・橋/河川敷は平面上で重なるため、直前まで走っていた撮影列に
+   * 近い候補を選ぶことで高さの入れ替わりを減らす。
+   */
+  private async resyncAlongRoute(
+    distanceM: number,
+    radiiMeters: number[],
+    generation: number,
+    options: PanoramaChangedOptions
+  ): Promise<boolean> {
+    const queries = [
+      { distanceM, radius: radiiMeters[0] },
+      { distanceM: distanceM + RESYNC_AHEAD_METERS, radius: radiiMeters[0] },
+      ...radiiMeters.slice(1).map((radius) => ({ distanceM, radius })),
+    ];
+    const routeDistance = totalDistance(this.route);
+    const seen = new Set<string>();
+    const candidates: Array<{
+      data: google.maps.StreetViewPanoramaData;
+      found: google.maps.LatLngLiteral;
+      projection: RouteProjection;
+      queryDistanceM: number;
+      capturedAlong: boolean;
+      sameDate: boolean;
+      sideDelta: number;
+    }> = [];
+    const referenceSide = this.referenceSide();
+
+    for (const query of queries) {
+      if (generation !== this.generation) return false;
+      const queryDistanceM = Math.min(query.distanceM, routeDistance);
+      const point = getPointAtDistance(this.route, queryDistanceM);
+      const data = await this.searchPanorama(point, query.radius);
+      if (generation !== this.generation) return false;
+      const latLng = data?.location?.latLng;
+      if (!data || !latLng) continue;
+      const panoId = data.location?.pano ?? `${latLng.lat()},${latLng.lng()}`;
+      if (seen.has(panoId)) continue;
+      seen.add(panoId);
+
+      const found = { lat: latLng.lat(), lng: latLng.lng() };
+      const projection = projectOntoRoute(this.route, found, queryDistanceM);
+      const imageDate = data.imageDate;
+      const description = locationDescription(data.location);
+      const reject = (reason: StepRejectReason) =>
+        this.log({
+          kind: "reject",
+          pano: data.location?.pano,
+          imageDate,
+          description,
+          distanceM: projection.distanceM,
+          sideM: projection.sideM,
+          reason,
         });
 
+      // 投稿パノラマ（建物内・遊歩道など）へは再同期しない
+      if (!isOfficialPano(data.location?.pano, data.copyright)) {
+        reject("contributed");
+        continue;
+      }
+      // ルート外パノラマ（公園・私道など）や後退方向への再同期は表示しない
+      if (projection.offsetM > RESYNC_OFF_ROUTE_METERS) {
+        reject("offRoute");
+        continue;
+      }
+      if (
+        projection.distanceM <
+        this.panoDistance - MIN_FORWARD_PROGRESS_METERS
+      ) {
+        reject("noProgress");
+        continue;
+      }
+      // 駅構内・地下街など（OUTDOOR検索をすり抜けた屋内）へは再同期しない
+      if (hasIndoorDescription(description)) {
+        reject("indoorName");
+        continue;
+      }
+
+      candidates.push({
+        data,
+        found,
+        projection,
+        queryDistanceM,
+        capturedAlong: isCapturedAlong(data.tiles?.centerHeading, point.heading),
+        sameDate:
+          this.currentImageDate === undefined ||
+          imageDate === undefined ||
+          imageDate === this.currentImageDate,
+        sideDelta:
+          referenceSide === null
+            ? 0
+            : Math.abs(projection.sideM - referenceSide),
+      });
+    }
+
+    candidates.sort(
+      (a, b) =>
+        Number(b.capturedAlong) - Number(a.capturedAlong) ||
+        Number(b.sameDate) - Number(a.sameDate) ||
+        a.sideDelta - b.sideDelta ||
+        a.projection.offsetM - b.projection.offsetM
+    );
+
+    const stalledM = this.targetDistance - this.panoDistance;
+    const relaxed = stalledM >= RESYNC_DATE_RELAX_DISTANCE_METERS;
+
+    for (const candidate of candidates) {
+      const { data, found, projection } = candidate;
+      const logReject = (reason: StepRejectReason) =>
+        this.log({
+          kind: "reject",
+          pano: data.location?.pano,
+          imageDate: data.imageDate,
+          description: locationDescription(data.location),
+          distanceM: projection.distanceM,
+          sideM: projection.sideM,
+          reason,
+        });
+
+      if (!relaxed) {
+        // 同じ撮影列・左右位置の候補がなければ、少し進むまで待つ
+        if (!candidate.sameDate) {
+          logReject("dateChange");
+          return false;
+        }
+        if (candidate.sideDelta > MAX_LATERAL_SHIFT_METERS) {
+          logReject("lateral");
+          return false;
+        }
+      } else {
+        // 保留を解いた再同期でも、行き止まり（駅改札など）へは飛ばない
+        const viable = await this.hasForwardLink(
+          data.links ?? [],
+          found,
+          projection,
+          generation
+        );
         if (generation !== this.generation) return false;
-        const latLng = data.location?.latLng;
-        if (!latLng) continue;
-        // 投稿パノラマ（建物内・遊歩道など）へは再同期しない
-        if (strict && !isOfficialPano(data.location?.pano, data.copyright)) {
+        if (!viable) {
+          logReject("noForwardLink");
           continue;
         }
-
-        const found = { lat: latLng.lat(), lng: latLng.lng() };
-        const projection = projectOntoRoute(this.route, found, distanceM);
-
-        if (strict) {
-          // ルート外パノラマ（公園・私道など）や後退方向への再同期は表示しない
-          if (projection.offsetM > RESYNC_OFF_ROUTE_METERS) return false;
-          if (
-            projection.distanceM <
-            this.panoDistance - MIN_FORWARD_PROGRESS_METERS
-          ) {
-            return false;
-          }
-        }
-
-        this.panorama.setPosition(latLng);
-        this.cancelHeadingTween();
-        this.panorama.setPov({
-          heading: closestRoadHeading(data.links, point.heading),
-          pitch: 0,
-        });
-
-        this.panoDistance =
-          projection.offsetM <= RESYNC_OFF_ROUTE_METERS
-            ? projection.distanceM
-            : distanceM;
-        this.panoStepCount += 1;
-        this.onPanoramaChanged?.(this.panoDistance, found, options);
-        return true;
-      } catch {
-        // パノラマなし: 半径を広げて再探索する
       }
+
+      const point = getPointAtDistance(this.route, candidate.queryDistanceM);
+      this.applyResync(
+        data,
+        found,
+        projection,
+        candidate.queryDistanceM,
+        point.heading,
+        options
+      );
+      return true;
     }
 
     return false;
+  }
+
+  /** 再同期先へsetPositionで移動し、状態と診断ログを更新する */
+  private applyResync(
+    data: google.maps.StreetViewPanoramaData,
+    found: google.maps.LatLngLiteral,
+    projection: RouteProjection,
+    distanceM: number,
+    routeHeading: number,
+    options: PanoramaChangedOptions
+  ): void {
+    const imageDate = data.imageDate;
+    const dateChanged =
+      this.currentImageDate !== undefined &&
+      imageDate !== undefined &&
+      imageDate !== this.currentImageDate;
+    const onRoute = projection.offsetM <= RESYNC_OFF_ROUTE_METERS;
+
+    const latLng = data.location?.latLng;
+    if (latLng) this.panorama.setPosition(latLng);
+    this.cancelHeadingTween();
+    this.panorama.setPov({
+      heading: closestRoadHeading(data.links ?? undefined, routeHeading),
+      pitch: 0,
+    });
+
+    this.panoDistance = onRoute ? projection.distanceM : distanceM;
+    this.currentImageDate = imageDate ?? this.currentImageDate;
+    this.currentSideM = onRoute ? projection.sideM : null;
+    this.recentSides = [];
+    this.rememberSide(this.currentSideM);
+    this.panoStepCount += 1;
+    this.log({
+      kind: "resync",
+      pano: data.location?.pano,
+      imageDate,
+      description: locationDescription(data.location),
+      distanceM: this.panoDistance,
+      sideM: projection.sideM,
+      dateChanged,
+    });
+    this.onPanoramaChanged?.(this.panoDistance, found, options);
   }
 
   /** 視線方向を最短回転方向で滑らかに補間する */
@@ -786,6 +1402,9 @@ export class StreetViewController {
     this.targetDistance = initialDistance;
     this.panoDistance = initialDistance;
     this.resyncBlockedUntilDistance = Number.NEGATIVE_INFINITY;
+    this.currentImageDate = undefined;
+    this.currentSideM = null;
+    this.recentSides = [];
     this.ready = this.initialize(initialDistance, this.generation);
   }
 
