@@ -1410,6 +1410,68 @@
   border: 1px solid rgba(248, 250, 252, 0.5);
 }
 
+/* ルート作成: 地点（出発地 → 経由地 → 目的地）と区間ごとのパノラマ列チェック */
+.route-point-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-point-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.route-point-row input:not([type]),
+.route-point-row input[type="text"] {
+  flex: 2;
+  min-width: 0;
+}
+
+.route-point-row .route-point-name {
+  flex: 1;
+}
+
+.route-point-kind {
+  min-width: 64px;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.route-point-row button {
+  padding: 4px 8px;
+  min-height: 0;
+}
+
+.route-creator .route-segment-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 70px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #86efac;
+}
+
+.route-segment-toggle input {
+  width: auto;
+}
+
+@media (max-width: 640px) {
+  .route-point-row {
+    flex-wrap: wrap;
+  }
+
+  .route-point-row .route-point-name {
+    flex-basis: 100%;
+  }
+
+  .route-creator .route-segment-toggle {
+    margin-left: 0;
+  }
+}
+
 /* パノラマ列の区間設定 */
 .pano-section-settings {
   padding: 12px 14px;

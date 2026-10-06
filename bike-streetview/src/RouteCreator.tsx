@@ -6,6 +6,7 @@ import {
   type CustomRoute,
 } from "./modules/customRoutes";
 import { loadMapsApi } from "./modules/streetViewController";
+import { reverseGeocodeArea } from "./modules/locationAddress";
 import {
   formatCoordinateText,
   parseRouteWaypointInput,
@@ -22,8 +23,12 @@ type MapPickTarget = "origin" | "destination" | "intermediate";
 type WaypointRow = {
   id: string;
   text: string;
+  /** 地点名（走行中の表示・ルート名に使う。空なら座標を表示） */
+  name: string;
   /** 走行中ミニマップへ赤丸表示するか。ルート計算には常に使われる */
   showOnMap: boolean;
+  /** この地点から次の地点までの区間でパノラマ列を使うか */
+  panoNext: boolean;
 };
 
 type RouteCreatorFields = {
@@ -39,10 +44,27 @@ function newWaypointRowId(): string {
   return `wp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 地図で選んだ地点の名前の候補（「大阪府」などの都道府県名は省く） */
+async function suggestPointName(position: google.maps.LatLngLiteral): Promise<string> {
+  const area = await reverseGeocodeArea(position);
+  return area.replace(/^.+?[都道府県](?=.)/, "");
+}
+
+/** 地点名があれば「地点名 | 緯度,経度」として渡し、走行中やルート名に地点名を使う */
+function withPointName(text: string, name: string): string {
+  const trimmedName = name.trim();
+  if (!trimmedName || text.includes("|")) return text;
+  const coordinate = safeParseWaypointCoordinate(text);
+  return coordinate ? `${trimmedName} | ${text.trim()}` : text;
+}
+
 export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
   const [name, setName] = useState("");
   const [origin, setOrigin] = useState("");
+  const [originName, setOriginName] = useState("");
+  const [originPanoNext, setOriginPanoNext] = useState(true);
   const [destination, setDestination] = useState("");
+  const [destinationName, setDestinationName] = useState("");
   const [waypointRows, setWaypointRows] = useState<WaypointRow[]>([]);
   const [travelMode, setTravelMode] =
     useState<CreateGoogleRouteRequest["travelMode"]>("MAIN_ROAD");
@@ -122,24 +144,43 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
             routeFieldsRef.current,
           ]);
 
+          // 地点名が空なら住所から候補を入れる（どの地点か分かるように）
+          const namePromise = suggestPointName(coordinate).catch(() => "");
+
           if (mapPickTargetRef.current === "origin") {
             setOrigin(coordinateText);
+            void namePromise.then((suggested) =>
+              setOriginName((current) => current || suggested)
+            );
             return;
           }
 
           if (mapPickTargetRef.current === "destination") {
             setDestination(coordinateText);
+            void namePromise.then((suggested) =>
+              setDestinationName((current) => current || suggested)
+            );
             return;
           }
 
+          const rowId = newWaypointRowId();
           setWaypointRows((current) => [
             ...current,
             {
-              id: newWaypointRowId(),
+              id: rowId,
               text: coordinateText,
+              name: "",
               showOnMap: true,
+              panoNext: true,
             },
           ]);
+          void namePromise.then((suggested) =>
+            setWaypointRows((current) =>
+              current.map((row) =>
+                row.id === rowId && !row.name ? { ...row, name: suggested } : row
+              )
+            )
+          );
           // プレビュー表示中にピンを置いたら自動で経路を引き直す
           if (previewActiveRef.current) {
             setAutoPreviewTick((tick) => tick + 1);
@@ -241,7 +282,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
 
   const updateWaypointRow = (
     rowId: string,
-    update: Partial<Pick<WaypointRow, "text" | "showOnMap">>
+    update: Partial<Pick<WaypointRow, "text" | "name" | "showOnMap" | "panoNext">>
   ) => {
     setWaypointRows((current) =>
       current.map((row) => (row.id === rowId ? { ...row, ...update } : row))
@@ -268,17 +309,25 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
   const addWaypointRow = () => {
     setWaypointRows((current) => [
       ...current,
-      { id: newWaypointRowId(), text: "", showOnMap: true },
+      { id: newWaypointRowId(), text: "", name: "", showOnMap: true, panoNext: true },
     ]);
   };
 
+  /** 区間ごとのパノラマ列使用（出発地→…→目的地、空の経由地行は除く） */
+  const buildPanoSegments = (): boolean[] => [
+    originPanoNext,
+    ...waypointRows.filter((row) => row.text.trim()).map((row) => row.panoNext),
+  ];
+
   const buildRequest = (): CreateGoogleRouteRequest => {
-    const parsedOrigin = parseRouteWaypointInput(origin);
-    const parsedDestination = parseRouteWaypointInput(destination);
+    const parsedOrigin = parseRouteWaypointInput(withPointName(origin, originName));
+    const parsedDestination = parseRouteWaypointInput(
+      withPointName(destination, destinationName)
+    );
     const parsedIntermediates = waypointRows
       .filter((row) => row.text.trim())
       .map((row) => {
-        const parsed = parseRouteWaypointInput(row.text);
+        const parsed = parseRouteWaypointInput(withPointName(row.text, row.name));
         return typeof parsed === "string"
           ? parsed
           : { ...parsed, showOnMap: row.showOnMap };
@@ -289,7 +338,11 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
     }
 
     return {
-      name: name.trim() || `${origin.trim()} → ${destination.trim()}`,
+      name:
+        name.trim() ||
+        `${originName.trim() || origin.trim()} → ${
+          destinationName.trim() || destination.trim()
+        }`,
       origin: parsedOrigin,
       destination: parsedDestination,
       intermediates: parsedIntermediates,
@@ -357,7 +410,7 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
     try {
       const request = buildRequest();
       const result = await createGoogleRoutesRoute(request);
-      onCreated(await saveCustomRoute(request, result));
+      onCreated(await saveCustomRoute(request, result, buildPanoSegments()));
     } catch (submitError) {
       setError((submitError as Error).message);
     } finally {
@@ -382,95 +435,130 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
           />
         </label>
 
-        <div className="route-creator-columns">
-          <label>
-            出発地
+        <div className="route-waypoint-rows">
+          <span className="route-waypoint-rows-title">
+            地点（通過順・経由地は最大25地点）
+          </span>
+          <small>
+            地名、「緯度,経度」が使えます。地点名は走行中の表示やルート名に使われます（地図で選ぶと住所から自動で入ります）。
+          </small>
+
+          <div className="route-point-row">
+            <span className="route-point-kind">出発地</span>
             <input
               required
+              aria-label="出発地"
               value={origin}
               onChange={(event) => {
                 setOrigin(event.target.value);
                 clearMapUndoStack();
               }}
-              placeholder="例: 大阪駅"
+              placeholder="例: 大阪駅 / 34.702485,135.495951"
             />
-          </label>
-          <label>
-            目的地
+            <input
+              className="route-point-name"
+              aria-label="出発地の地点名"
+              value={originName}
+              onChange={(event) => setOriginName(event.target.value)}
+              placeholder="地点名（例: 大阪）"
+            />
+          </div>
+          <PanoSegmentToggle
+            checked={originPanoNext}
+            onChange={setOriginPanoNext}
+          />
+
+          {waypointRows.map((row, index) => (
+            <div className="route-point-group" key={row.id}>
+              <div className="route-point-row">
+                <span className="route-point-kind">経由地{index + 1}</span>
+                <input
+                  aria-label={`経由地${index + 1}`}
+                  value={row.text}
+                  onChange={(event) => {
+                    updateWaypointRow(row.id, { text: event.target.value });
+                    clearMapUndoStack();
+                  }}
+                  placeholder="例: 蒲生四丁目駅 / 34.700380,135.546240"
+                />
+                <input
+                  className="route-point-name"
+                  aria-label={`経由地${index + 1}の地点名`}
+                  value={row.name}
+                  onChange={(event) =>
+                    updateWaypointRow(row.id, { name: event.target.value })
+                  }
+                  placeholder="地点名（例: 守口）"
+                />
+                <label
+                  className="route-waypoint-toggle"
+                  title="オンにすると走行中のミニマップへ赤丸で表示します。オフでもルート計算には使われます"
+                >
+                  <input
+                    type="checkbox"
+                    checked={row.showOnMap}
+                    onChange={(event) =>
+                      updateWaypointRow(row.id, {
+                        showOnMap: event.target.checked,
+                      })
+                    }
+                  />
+                  赤丸
+                </label>
+                <button
+                  type="button"
+                  aria-label={`経由地${index + 1}を上へ`}
+                  disabled={index === 0}
+                  onClick={() => moveWaypointRow(row.id, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`経由地${index + 1}を下へ`}
+                  disabled={index === waypointRows.length - 1}
+                  onClick={() => moveWaypointRow(row.id, 1)}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  aria-label={`経由地${index + 1}を削除`}
+                  onClick={() => removeWaypointRow(row.id)}
+                >
+                  削除
+                </button>
+              </div>
+              <PanoSegmentToggle
+                checked={row.panoNext}
+                onChange={(checked) =>
+                  updateWaypointRow(row.id, { panoNext: checked })
+                }
+              />
+            </div>
+          ))}
+
+          <div className="route-point-row">
+            <span className="route-point-kind">目的地</span>
             <input
               required
+              aria-label="目的地"
               value={destination}
               onChange={(event) => {
                 setDestination(event.target.value);
                 clearMapUndoStack();
               }}
-              placeholder="例: 京都駅"
+              placeholder="例: 京都駅 / 34.985849,135.758767"
             />
-          </label>
-        </div>
+            <input
+              className="route-point-name"
+              aria-label="目的地の地点名"
+              value={destinationName}
+              onChange={(event) => setDestinationName(event.target.value)}
+              placeholder="地点名（例: 京都）"
+            />
+          </div>
 
-        <div className="route-waypoint-rows">
-          <span className="route-waypoint-rows-title">
-            経由地（通過順・最大25地点）
-          </span>
-          {waypointRows.length === 0 && (
-            <small>
-              「経由地追加」を選んで地図をクリックするか、「＋
-              経由地を追加」で入力します。地名、「緯度,経度」、「表示名 |
-              緯度,経度」が使えます。
-            </small>
-          )}
-          {waypointRows.map((row, index) => (
-            <div className="route-waypoint-row" key={row.id}>
-              <span className="route-waypoint-index">{index + 1}</span>
-              <input
-                value={row.text}
-                onChange={(event) => {
-                  updateWaypointRow(row.id, { text: event.target.value });
-                  clearMapUndoStack();
-                }}
-                placeholder="例: 蒲生四丁目駅 / 34.700380,135.546240"
-              />
-              <label
-                className="route-waypoint-toggle"
-                title="オンにすると走行中のミニマップへ赤丸で表示します。オフでもルート計算には使われます"
-              >
-                <input
-                  type="checkbox"
-                  checked={row.showOnMap}
-                  onChange={(event) =>
-                    updateWaypointRow(row.id, {
-                      showOnMap: event.target.checked,
-                    })
-                  }
-                />
-                赤丸
-              </label>
-              <button
-                type="button"
-                aria-label={`経由地${index + 1}を上へ`}
-                disabled={index === 0}
-                onClick={() => moveWaypointRow(row.id, -1)}
-              >
-                ↑
-              </button>
-              <button
-                type="button"
-                aria-label={`経由地${index + 1}を下へ`}
-                disabled={index === waypointRows.length - 1}
-                onClick={() => moveWaypointRow(row.id, 1)}
-              >
-                ↓
-              </button>
-              <button
-                type="button"
-                aria-label={`経由地${index + 1}を削除`}
-                onClick={() => removeWaypointRow(row.id)}
-              >
-                削除
-              </button>
-            </div>
-          ))}
           <div>
             <button
               type="button"
@@ -481,7 +569,10 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
             </button>
           </div>
           <small>
-            「赤丸」をオフにした経由地はルート計算には使われますが、走行中のミニマップには表示されません。
+            経由地は出発地と目的地の間に入ります。「赤丸」をオフにした経由地はルート計算には使われますが、走行中のミニマップには表示されません。
+          </small>
+          <small>
+            「パノラマ列を使う」は、都心など高架・地下の取り違えが起きやすい区間だけオンにすると、パノラマ列の作成が速くなります。オフの区間は走行中にパノラマを探す方式で走ります。
           </small>
         </div>
 
@@ -596,6 +687,30 @@ export function RouteCreator({ onCancel, onCreated }: RouteCreatorProps) {
         </div>
       </form>
     </div>
+  );
+}
+
+/** 地点と地点の間に置く「この区間はパノラマ列を使う」チェック */
+function PanoSegmentToggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      className="route-segment-toggle"
+      title="オンにした区間だけパノラマ列（高架・地下の取り違えを事前に直した並び）を作ります"
+    >
+      <span aria-hidden="true">↓</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      この区間はパノラマ列を使う
+    </label>
   );
 }
 
